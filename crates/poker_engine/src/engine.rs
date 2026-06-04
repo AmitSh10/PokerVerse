@@ -242,6 +242,34 @@ impl GameEngine {
         })
     }
 
+    pub fn award_showdown_pot(&mut self) -> Result<PayoutResult, GameEngineError> {
+        let showdown = self.showdown()?;
+        let total_pot = self.current_hand_mut()?.take_pot();
+        let winner_count = showdown.winner_seats().len() as ChipAmount;
+        let base_share = total_pot / winner_count;
+        let extra_chips = total_pot % winner_count;
+        let mut payouts = Vec::with_capacity(showdown.winner_seats().len());
+
+        for (index, seat) in showdown.winner_seats().iter().copied().enumerate() {
+            let amount = base_share + u64::from((index as ChipAmount) < extra_chips);
+            let player = self
+                .table
+                .player_at_mut(seat)
+                .ok_or(TableError::SeatEmpty { seat })?;
+
+            player.credit_chips(amount);
+            payouts.push(PlayerPayout {
+                seat,
+                player_id: player.id(),
+                amount,
+            });
+        }
+
+        self.advance_hand_phase()?;
+
+        Ok(PayoutResult { total_pot, payouts })
+    }
+
     pub fn apply_player_action(
         &mut self,
         seat: SeatIndex,
@@ -576,6 +604,43 @@ impl PlayerShowdownHand {
 
     pub fn hand(&self) -> &EvaluatedHand {
         &self.hand
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutResult {
+    total_pot: ChipAmount,
+    payouts: Vec<PlayerPayout>,
+}
+
+impl PayoutResult {
+    pub fn total_pot(&self) -> ChipAmount {
+        self.total_pot
+    }
+
+    pub fn payouts(&self) -> &[PlayerPayout] {
+        &self.payouts
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerPayout {
+    seat: SeatIndex,
+    player_id: PlayerId,
+    amount: ChipAmount,
+}
+
+impl PlayerPayout {
+    pub fn seat(&self) -> SeatIndex {
+        self.seat
+    }
+
+    pub fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub fn amount(&self) -> ChipAmount {
+        self.amount
     }
 }
 
@@ -1231,6 +1296,129 @@ mod tests {
                 .iter()
                 .all(|player_hand| player_hand.hand().rank().category() == HandCategory::Straight)
         );
+    }
+
+    #[test]
+    fn award_showdown_pot_credits_single_winner_and_completes_hand() {
+        let mut engine = engine_with_started_hand();
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(0),
+            [
+                card(Rank::Ten, Suit::Clubs),
+                card(Rank::Three, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(3),
+            [
+                card(Rank::Nine, Suit::Clubs),
+                card(Rank::Eight, Suit::Diamonds),
+            ],
+        );
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        force_board_and_showdown(
+            &mut engine,
+            [
+                card(Rank::Ace, Suit::Spades),
+                card(Rank::King, Suit::Hearts),
+                card(Rank::Queen, Suit::Clubs),
+            ],
+            card(Rank::Jack, Suit::Diamonds),
+            card(Rank::Two, Suit::Spades),
+        );
+
+        let payout = engine
+            .award_showdown_pot()
+            .expect("showdown pot should be awarded");
+
+        assert_eq!(payout.total_pot(), 15);
+        assert_eq!(payout.payouts().len(), 1);
+        assert_eq!(payout.payouts()[0].seat(), SeatIndex(0));
+        assert_eq!(payout.payouts()[0].amount(), 15);
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("winner should be seated")
+                .stack(),
+            1_010
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(3))
+                .expect("loser should be seated")
+                .stack(),
+            990
+        );
+
+        let hand = engine.current_hand().expect("hand should remain active");
+        assert_eq!(hand.pot(), 0);
+        assert_eq!(hand.phase(), GamePhase::HandComplete);
+    }
+
+    #[test]
+    fn award_showdown_pot_splits_tied_winners_with_odd_chip_to_first_winner() {
+        let mut engine = engine_with_started_hand();
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(0),
+            [
+                card(Rank::Three, Suit::Clubs),
+                card(Rank::Two, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(3),
+            [card(Rank::Four, Suit::Clubs), card(Rank::Two, Suit::Hearts)],
+        );
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        force_board_and_showdown(
+            &mut engine,
+            [
+                card(Rank::Ace, Suit::Spades),
+                card(Rank::King, Suit::Hearts),
+                card(Rank::Queen, Suit::Clubs),
+            ],
+            card(Rank::Jack, Suit::Diamonds),
+            card(Rank::Ten, Suit::Spades),
+        );
+
+        let payout = engine
+            .award_showdown_pot()
+            .expect("showdown pot should be awarded");
+
+        assert_eq!(payout.total_pot(), 15);
+        assert_eq!(payout.payouts().len(), 2);
+        assert_eq!(payout.payouts()[0].seat(), SeatIndex(0));
+        assert_eq!(payout.payouts()[0].amount(), 8);
+        assert_eq!(payout.payouts()[1].seat(), SeatIndex(3));
+        assert_eq!(payout.payouts()[1].amount(), 7);
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("first winner should be seated")
+                .stack(),
+            1_003
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(3))
+                .expect("second winner should be seated")
+                .stack(),
+            997
+        );
+
+        let hand = engine.current_hand().expect("hand should remain active");
+        assert_eq!(hand.pot(), 0);
+        assert_eq!(hand.phase(), GamePhase::HandComplete);
     }
 
     #[test]

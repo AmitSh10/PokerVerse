@@ -147,6 +147,12 @@ impl HandState {
         self.pot += amount;
     }
 
+    pub fn take_pot(&mut self) -> ChipAmount {
+        let pot = self.pot;
+        self.pot = 0;
+        pot
+    }
+
     pub fn advance_phase(&mut self) -> Result<GamePhase, HandStateError> {
         let next_phase = self
             .phase
@@ -328,6 +334,16 @@ mod tests {
         assert_eq!(hand.round_contribution_for(SeatIndex(2)), 10);
         assert_eq!(hand.current_bet(), 20);
         assert_eq!(hand.pot(), 30);
+    }
+
+    #[test]
+    fn take_pot_returns_and_clears_pot() {
+        let mut hand = HandState::new(positions());
+        hand.record_contribution(SeatIndex(1), 25);
+        hand.record_contribution(SeatIndex(2), 50);
+
+        assert_eq!(hand.take_pot(), 75);
+        assert_eq!(hand.pot(), 0);
     }
 
     #[test]
