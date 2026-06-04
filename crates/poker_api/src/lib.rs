@@ -309,9 +309,10 @@ async fn handle_room_socket(mut socket: WebSocket, state: ApiState, room_id: Roo
     let Ok(mut room_receiver) = state.subscribe_room(room_id) else {
         let _ = send_room_socket_message(
             &mut socket,
-            &WebSocketServerMessage::Error(ApiErrorBody {
-                error: "room broadcast channel unavailable".to_string(),
-            }),
+            &WebSocketServerMessage::Error(ApiErrorBody::new(
+                ApiErrorCode::InternalError,
+                "room broadcast channel unavailable",
+            )),
         )
         .await;
         return;
@@ -339,9 +340,12 @@ async fn handle_room_socket(mut socket: WebSocket, state: ApiState, room_id: Roo
             message = room_receiver.recv() => {
                 let response = match message {
                     Ok(message) => message,
-                    Err(broadcast::error::RecvError::Lagged(_)) => WebSocketServerMessage::Error(ApiErrorBody {
-                        error: "room websocket receiver lagged behind".to_string(),
-                    }),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        WebSocketServerMessage::Error(ApiErrorBody::new(
+                            ApiErrorCode::WebSocketLagged,
+                            "room websocket receiver lagged behind",
+                        ))
+                    }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
 
@@ -375,12 +379,14 @@ fn handle_room_socket_message(
         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
             return Some(WebSocketServerMessage::Ignored);
         }
-        Ok(Message::Binary(_)) => WebSocketServerMessage::Error(ApiErrorBody {
-            error: "expected text JSON room command".to_string(),
-        }),
-        Err(error) => WebSocketServerMessage::Error(ApiErrorBody {
-            error: format!("websocket receive error: {error}"),
-        }),
+        Ok(Message::Binary(_)) => WebSocketServerMessage::Error(ApiErrorBody::new(
+            ApiErrorCode::InvalidWebSocketMessage,
+            "expected text JSON room command",
+        )),
+        Err(error) => WebSocketServerMessage::Error(ApiErrorBody::new(
+            ApiErrorCode::WebSocketReceiveError,
+            format!("websocket receive error: {error}"),
+        )),
     })
 }
 
@@ -392,17 +398,16 @@ fn handle_room_socket_text(
     let command = match serde_json::from_str::<RoomCommand>(text) {
         Ok(command) => command,
         Err(error) => {
-            return WebSocketServerMessage::Error(ApiErrorBody {
-                error: format!("invalid room command JSON: {error}"),
-            });
+            return WebSocketServerMessage::Error(ApiErrorBody::new(
+                ApiErrorCode::InvalidRoomCommandJson,
+                format!("invalid room command JSON: {error}"),
+            ));
         }
     };
 
     match dispatch_room_command(state, room_id, command) {
         Ok(result) => WebSocketServerMessage::CommandResult(result),
-        Err(error) => WebSocketServerMessage::Error(ApiErrorBody {
-            error: error.to_string(),
-        }),
+        Err(error) => WebSocketServerMessage::Error(ApiErrorBody::from_api_error(error)),
     }
 }
 
@@ -461,19 +466,62 @@ impl IntoResponse for ApiError {
             Self::RoomManager(RoomManagerError::Room(_)) => StatusCode::BAD_REQUEST,
         };
 
-        (
-            status,
-            Json(ApiErrorBody {
-                error: self.to_string(),
-            }),
-        )
-            .into_response()
+        (status, Json(ApiErrorBody::from_api_error(self))).into_response()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiErrorCode {
+    InternalError,
+    RoomAlreadyExists,
+    RoomNotFound,
+    InvalidRoomCommand,
+    InvalidRoomCommandJson,
+    InvalidWebSocketMessage,
+    WebSocketLagged,
+    WebSocketReceiveError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiErrorBody {
+    code: ApiErrorCode,
     error: String,
+}
+
+impl ApiErrorBody {
+    pub fn new(code: ApiErrorCode, error: impl Into<String>) -> Self {
+        Self {
+            code,
+            error: error.into(),
+        }
+    }
+
+    pub fn from_api_error(error: ApiError) -> Self {
+        let code = match &error {
+            ApiError::StateLockPoisoned => ApiErrorCode::InternalError,
+            ApiError::RoomManager(RoomManagerError::RoomAlreadyExists { .. }) => {
+                ApiErrorCode::RoomAlreadyExists
+            }
+            ApiError::RoomManager(RoomManagerError::RoomNotFound { .. }) => {
+                ApiErrorCode::RoomNotFound
+            }
+            ApiError::RoomManager(RoomManagerError::RoomLockPoisoned { .. }) => {
+                ApiErrorCode::InternalError
+            }
+            ApiError::RoomManager(RoomManagerError::Room(_)) => ApiErrorCode::InvalidRoomCommand,
+        };
+
+        Self::new(code, error.to_string())
+    }
+
+    pub fn code(&self) -> ApiErrorCode {
+        self.code
+    }
+
+    pub fn error(&self) -> &str {
+        &self.error
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +641,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_room_endpoint_returns_conflict_for_duplicate_room() {
+        let app = app(ApiState::default());
+        let request = CreateRoomRequest {
+            id: RoomId(7),
+            table_config: table_config(),
+        };
+        app.clone()
+            .oneshot(json_request("POST", "/rooms", request.clone()))
+            .await
+            .expect("first create room request should succeed");
+
+        let response = app
+            .oneshot(json_request("POST", "/rooms", request))
+            .await
+            .expect("duplicate create room request should succeed");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json::<ApiErrorBody>(response).await;
+        assert_eq!(body.code(), ApiErrorCode::RoomAlreadyExists);
+        assert!(body.error().contains("7"));
+    }
+
+    #[tokio::test]
     async fn list_rooms_endpoint_returns_room_summaries() {
         let app = app(ApiState::default());
         for id in [RoomId(7), RoomId(3)] {
@@ -688,7 +759,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json::<ApiErrorBody>(response).await;
-        assert!(body.error.contains("404"));
+        assert_eq!(body.code(), ApiErrorCode::RoomNotFound);
+        assert!(body.error().contains("404"));
     }
 
     #[tokio::test]
@@ -750,7 +822,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json::<ApiErrorBody>(response).await;
-        assert!(body.error.contains("404"));
+        assert_eq!(body.code(), ApiErrorCode::RoomNotFound);
+        assert!(body.error().contains("404"));
     }
 
     #[tokio::test]
@@ -973,7 +1046,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json::<ApiErrorBody>(response).await;
-        assert!(body.error.contains("404"));
+        assert_eq!(body.code(), ApiErrorCode::RoomNotFound);
+        assert!(body.error().contains("404"));
     }
 
     #[test]
@@ -1009,6 +1083,7 @@ mod tests {
         let WebSocketServerMessage::Error(error) = message else {
             panic!("expected error websocket message");
         };
-        assert!(error.error.contains("invalid room command JSON"));
+        assert_eq!(error.code(), ApiErrorCode::InvalidRoomCommandJson);
+        assert!(error.error().contains("invalid room command JSON"));
     }
 }
