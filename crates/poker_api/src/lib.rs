@@ -21,6 +21,7 @@ use poker_server::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tower_http::cors::CorsLayer;
 
 const ROOM_BROADCAST_CAPACITY: usize = 128;
 pub const API_ADDR_ENV: &str = "POKERVERSE_API_ADDR";
@@ -163,7 +164,12 @@ pub fn app(state: ApiState) -> Router {
         .route("/rooms/{room_id}", get(get_room).delete(close_room))
         .route("/rooms/{room_id}/commands", post(handle_room_command))
         .route("/rooms/{room_id}/ws", any(room_websocket))
+        .layer(cors_layer())
         .with_state(state)
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::permissive()
 }
 
 pub async fn serve(addr: SocketAddr) -> std::io::Result<()> {
@@ -617,6 +623,30 @@ mod tests {
             HealthResponse {
                 status: "ok".to_string(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_browser_api_requests() {
+        let app = app(ApiState::default());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/rooms")
+                    .header(header::ORIGIN, "http://localhost:5173")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&"*".parse().expect("wildcard origin header should parse"))
         );
     }
 
