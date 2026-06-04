@@ -1,8 +1,15 @@
-use std::{net::SocketAddr, process::ExitCode};
+use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let config = match poker_api::ApiConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let addr = config.addr();
 
     match poker_api::serve(addr).await {
         Ok(()) => ExitCode::SUCCESS,

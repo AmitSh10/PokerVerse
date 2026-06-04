@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt,
+    env, fmt,
     net::SocketAddr,
     sync::{Arc, RwLock},
 };
@@ -23,6 +23,74 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 const ROOM_BROADCAST_CAPACITY: usize = 128;
+pub const API_ADDR_ENV: &str = "POKERVERSE_API_ADDR";
+
+pub fn default_api_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 3000))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApiConfig {
+    addr: SocketAddr,
+}
+
+impl ApiConfig {
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr }
+    }
+
+    pub fn from_env() -> Result<Self, ApiConfigError> {
+        Self::from_addr_value(env::var(API_ADDR_ENV).ok())
+    }
+
+    pub fn from_addr_value(value: Option<impl AsRef<str>>) -> Result<Self, ApiConfigError> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        let value = value.as_ref().trim();
+
+        if value.is_empty() {
+            return Ok(Self::default());
+        }
+
+        Ok(Self::new(value.parse().map_err(|source| {
+            ApiConfigError::InvalidAddr {
+                value: value.to_string(),
+                source,
+            }
+        })?))
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self::new(default_api_addr())
+    }
+}
+
+#[derive(Debug)]
+pub enum ApiConfigError {
+    InvalidAddr {
+        value: String,
+        source: std::net::AddrParseError,
+    },
+}
+
+impl fmt::Display for ApiConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAddr { value, source } => {
+                write!(f, "invalid api bind address '{value}': {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApiConfigError {}
 
 #[derive(Debug, Clone)]
 pub struct ApiState {
@@ -410,6 +478,8 @@ pub struct ApiErrorBody {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
@@ -421,6 +491,40 @@ mod tests {
 
     fn table_config() -> TableConfig {
         TableConfig::new(6, 5, 10, 100, 1_000).expect("table config should be valid")
+    }
+
+    #[test]
+    fn api_config_defaults_to_localhost_port_3000() {
+        let config = ApiConfig::from_addr_value(None::<&str>).expect("config should parse");
+
+        assert_eq!(config.addr(), default_api_addr());
+    }
+
+    #[test]
+    fn api_config_uses_default_for_blank_addr_value() {
+        let config = ApiConfig::from_addr_value(Some("   ")).expect("config should parse");
+
+        assert_eq!(config.addr(), default_api_addr());
+    }
+
+    #[test]
+    fn api_config_parses_custom_addr_value() {
+        let config = ApiConfig::from_addr_value(Some("0.0.0.0:8080")).expect("config should parse");
+
+        assert_eq!(
+            config.addr(),
+            "0.0.0.0:8080"
+                .parse::<SocketAddr>()
+                .expect("test address should parse")
+        );
+    }
+
+    #[test]
+    fn api_config_rejects_invalid_addr_value() {
+        let error =
+            ApiConfig::from_addr_value(Some("not an address")).expect_err("config should fail");
+
+        assert!(error.to_string().contains("not an address"));
     }
 
     async fn response_json<T>(response: Response) -> T
