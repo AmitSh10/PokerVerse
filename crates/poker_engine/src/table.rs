@@ -110,6 +110,46 @@ impl fmt::Display for TableConfigError {
 
 impl std::error::Error for TableConfigError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandPositions {
+    dealer: SeatIndex,
+    small_blind: SeatIndex,
+    big_blind: SeatIndex,
+    first_to_act: SeatIndex,
+}
+
+impl HandPositions {
+    pub const fn new(
+        dealer: SeatIndex,
+        small_blind: SeatIndex,
+        big_blind: SeatIndex,
+        first_to_act: SeatIndex,
+    ) -> Self {
+        Self {
+            dealer,
+            small_blind,
+            big_blind,
+            first_to_act,
+        }
+    }
+
+    pub fn dealer(&self) -> SeatIndex {
+        self.dealer
+    }
+
+    pub fn small_blind(&self) -> SeatIndex {
+        self.small_blind
+    }
+
+    pub fn big_blind(&self) -> SeatIndex {
+        self.big_blind
+    }
+
+    pub fn first_to_act(&self) -> SeatIndex {
+        self.first_to_act
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Table {
     config: TableConfig,
@@ -157,6 +197,48 @@ impl Table {
 
     pub fn can_start_hand(&self) -> bool {
         self.playing_seats().len() >= 2
+    }
+
+    pub fn hand_positions(
+        &self,
+        dealer_seat: SeatIndex,
+    ) -> Result<Option<HandPositions>, TableError> {
+        self.seat_offset(dealer_seat)?;
+
+        let playing_count = self.playing_seats().len();
+
+        if playing_count < 2 {
+            return Ok(None);
+        }
+
+        if !self
+            .player_at(dealer_seat)
+            .is_some_and(Player::can_play_hand)
+        {
+            return Err(TableError::DealerCannotPlay { seat: dealer_seat });
+        }
+
+        if playing_count == 2 {
+            let big_blind = self.required_next_playing_seat_after(dealer_seat)?;
+
+            return Ok(Some(HandPositions::new(
+                dealer_seat,
+                dealer_seat,
+                big_blind,
+                dealer_seat,
+            )));
+        }
+
+        let small_blind = self.required_next_playing_seat_after(dealer_seat)?;
+        let big_blind = self.required_next_playing_seat_after(small_blind)?;
+        let first_to_act = self.required_next_playing_seat_after(big_blind)?;
+
+        Ok(Some(HandPositions::new(
+            dealer_seat,
+            small_blind,
+            big_blind,
+            first_to_act,
+        )))
     }
 
     pub fn available_seats(&self) -> Vec<SeatIndex> {
@@ -221,6 +303,13 @@ impl Table {
         seat: SeatIndex,
     ) -> Result<Option<SeatIndex>, TableError> {
         self.next_seat_after(seat, Player::can_play_hand)
+    }
+
+    fn required_next_playing_seat_after(&self, seat: SeatIndex) -> Result<SeatIndex, TableError> {
+        self.next_playing_seat_after(seat)?
+            .ok_or_else(|| TableError::NotEnoughPlayingPlayers {
+                playing_count: self.playing_seats().len(),
+            })
     }
 
     fn next_seat_after<F>(
@@ -302,6 +391,12 @@ pub enum TableError {
         buy_in: ChipAmount,
         max_buy_in: ChipAmount,
     },
+    DealerCannotPlay {
+        seat: SeatIndex,
+    },
+    NotEnoughPlayingPlayers {
+        playing_count: usize,
+    },
 }
 
 impl fmt::Display for TableError {
@@ -317,6 +412,12 @@ impl fmt::Display for TableError {
             }
             Self::BuyInTooLarge { buy_in, max_buy_in } => {
                 write!(f, "buy-in {buy_in} is above maximum {max_buy_in}")
+            }
+            Self::DealerCannotPlay { seat } => {
+                write!(f, "dealer seat {} cannot play this hand", seat.0)
+            }
+            Self::NotEnoughPlayingPlayers { playing_count } => {
+                write!(f, "need at least two playing players, got {playing_count}")
             }
         }
     }
@@ -502,6 +603,119 @@ mod tests {
             .expect("player should be seated");
 
         assert_eq!(table.next_playing_seat_after(SeatIndex(0)), Ok(None));
+    }
+
+    #[test]
+    fn hand_positions_returns_none_when_fewer_than_two_players_can_play() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+
+        assert_eq!(table.hand_positions(SeatIndex(0)), Ok(None));
+    }
+
+    #[test]
+    fn heads_up_hand_positions_make_dealer_the_small_blind() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(3), 1_000)
+            .expect("player should be seated");
+
+        let positions = table
+            .hand_positions(SeatIndex(0))
+            .expect("dealer seat should be valid")
+            .expect("hand should be able to start");
+
+        assert_eq!(positions.dealer(), SeatIndex(0));
+        assert_eq!(positions.small_blind(), SeatIndex(0));
+        assert_eq!(positions.big_blind(), SeatIndex(3));
+        assert_eq!(positions.first_to_act(), SeatIndex(0));
+    }
+
+    #[test]
+    fn multi_player_hand_positions_start_after_big_blind() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(2), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(3), "Linus", SeatIndex(4), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(4), "Margaret", SeatIndex(5), 1_000)
+            .expect("player should be seated");
+
+        let positions = table
+            .hand_positions(SeatIndex(0))
+            .expect("dealer seat should be valid")
+            .expect("hand should be able to start");
+
+        assert_eq!(positions.dealer(), SeatIndex(0));
+        assert_eq!(positions.small_blind(), SeatIndex(2));
+        assert_eq!(positions.big_blind(), SeatIndex(4));
+        assert_eq!(positions.first_to_act(), SeatIndex(5));
+    }
+
+    #[test]
+    fn hand_positions_skip_sitting_out_players() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(1), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(3), "Linus", SeatIndex(3), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(4), "Margaret", SeatIndex(5), 1_000)
+            .expect("player should be seated");
+
+        table
+            .player_at_mut(SeatIndex(1))
+            .expect("player should be seated")
+            .sit_out();
+
+        let positions = table
+            .hand_positions(SeatIndex(0))
+            .expect("dealer seat should be valid")
+            .expect("hand should be able to start");
+
+        assert_eq!(positions.small_blind(), SeatIndex(3));
+        assert_eq!(positions.big_blind(), SeatIndex(5));
+        assert_eq!(positions.first_to_act(), SeatIndex(0));
+    }
+
+    #[test]
+    fn hand_positions_reject_non_playing_dealer_when_hand_can_start() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(2), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(3), "Linus", SeatIndex(4), 1_000)
+            .expect("player should be seated");
+
+        table
+            .player_at_mut(SeatIndex(0))
+            .expect("player should be seated")
+            .sit_out();
+
+        assert_eq!(
+            table.hand_positions(SeatIndex(0)),
+            Err(TableError::DealerCannotPlay { seat: SeatIndex(0) })
+        );
     }
 
     #[test]

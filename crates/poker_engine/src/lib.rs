@@ -8,4 +8,4 @@ pub use card::{Card, Rank, Suit};
 pub use deck::Deck;
 pub use player::{ChipAmount, Player, PlayerError, PlayerId, PlayerStatus, SeatIndex};
 pub use state::{GamePhase, HandState, HandStateError};
-pub use table::{Table, TableConfig, TableConfigError, TableError};
+pub use table::{HandPositions, Table, TableConfig, TableConfigError, TableError};
