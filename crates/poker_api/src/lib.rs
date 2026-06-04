@@ -15,8 +15,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use poker_engine::TableConfig;
-use poker_server::{RoomCommand, RoomCommandResult, RoomId, RoomManager, RoomManagerError};
+use poker_engine::{GameSnapshot, TableConfig};
+use poker_server::{
+    RoomCommand, RoomCommandResult, RoomId, RoomManager, RoomManagerError, RoomSummary,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -79,7 +81,8 @@ impl Default for ApiState {
 pub fn app(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/rooms", post(create_room))
+        .route("/rooms", get(list_rooms).post(create_room))
+        .route("/rooms/{room_id}", get(get_room))
         .route("/rooms/{room_id}/commands", post(handle_room_command))
         .route("/rooms/{room_id}/ws", any(room_websocket))
         .with_state(state)
@@ -99,6 +102,27 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListRoomsResponse {
+    rooms: Vec<RoomSummary>,
+}
+
+impl ListRoomsResponse {
+    pub fn rooms(&self) -> &[RoomSummary] {
+        &self.rooms
+    }
+}
+
+async fn list_rooms(State(state): State<ApiState>) -> Result<Json<ListRoomsResponse>, ApiError> {
+    let rooms = state
+        .rooms
+        .read()
+        .map_err(|_| ApiError::StateLockPoisoned)?;
+    let summaries = rooms.room_summaries()?;
+
+    Ok(Json(ListRoomsResponse { rooms: summaries }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +153,37 @@ async fn create_room(
         StatusCode::CREATED,
         Json(CreateRoomResponse { id: request.id }),
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomDetailsResponse {
+    summary: RoomSummary,
+    snapshot: GameSnapshot,
+}
+
+impl RoomDetailsResponse {
+    pub fn summary(&self) -> &RoomSummary {
+        &self.summary
+    }
+
+    pub fn snapshot(&self) -> &GameSnapshot {
+        &self.snapshot
+    }
+}
+
+async fn get_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<Json<RoomDetailsResponse>, ApiError> {
+    let room_id = RoomId(room_id);
+    let rooms = state
+        .rooms
+        .read()
+        .map_err(|_| ApiError::StateLockPoisoned)?;
+    let summary = rooms.room_summary(room_id)?;
+    let snapshot = rooms.public_snapshot(room_id)?;
+
+    Ok(Json(RoomDetailsResponse { summary, snapshot }))
 }
 
 async fn handle_room_command(
@@ -404,6 +459,105 @@ mod tests {
             response_json::<CreateRoomResponse>(response).await,
             CreateRoomResponse { id: RoomId(7) }
         );
+    }
+
+    #[tokio::test]
+    async fn list_rooms_endpoint_returns_room_summaries() {
+        let app = app(ApiState::default());
+        for id in [RoomId(7), RoomId(3)] {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/rooms",
+                    CreateRoomRequest {
+                        id,
+                        table_config: table_config(),
+                    },
+                ))
+                .await
+                .expect("create room request should succeed");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rooms")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json::<ListRoomsResponse>(response).await;
+        assert_eq!(
+            body.rooms().iter().map(RoomSummary::id).collect::<Vec<_>>(),
+            vec![RoomId(3), RoomId(7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_room_endpoint_returns_summary_and_snapshot() {
+        let app = app(ApiState::default());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms",
+                CreateRoomRequest {
+                    id: RoomId(7),
+                    table_config: table_config(),
+                },
+            ))
+            .await
+            .expect("create room request should succeed");
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::SitPlayer {
+                    id: PlayerId(1),
+                    display_name: "Ada".to_string(),
+                    seat: SeatIndex(0),
+                    buy_in: 1_000,
+                },
+            ))
+            .await
+            .expect("sit player request should succeed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rooms/7")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json::<RoomDetailsResponse>(response).await;
+        assert_eq!(body.summary().id(), RoomId(7));
+        assert_eq!(body.summary().seated_player_count(), 1);
+        assert_eq!(body.snapshot().players().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_room_endpoint_returns_not_found_for_missing_room() {
+        let app = app(ApiState::default());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rooms/404")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json::<ApiErrorBody>(response).await;
+        assert!(body.error.contains("404"));
     }
 
     #[tokio::test]

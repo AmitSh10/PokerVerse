@@ -5,8 +5,8 @@ use std::{
 };
 
 use poker_engine::{
-    ChipAmount, GameEngine, GameEngineError, GameEvent, GameSnapshot, PlayerAction, PlayerId,
-    SeatIndex, TableConfig,
+    ChipAmount, GameEngine, GameEngineError, GameEvent, GamePhase, GameSnapshot, PlayerAction,
+    PlayerId, SeatIndex, TableConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,17 @@ impl Room {
 
     pub fn engine(&self) -> &GameEngine {
         &self.engine
+    }
+
+    pub fn summary(&self) -> RoomSummary {
+        RoomSummary::new(
+            self.id,
+            self.engine.table().config(),
+            self.engine.table().seat_count(),
+            self.engine.table().seated_player_count(),
+            self.engine.table().can_start_hand(),
+            self.engine.current_hand().map(|hand| hand.phase()),
+        )
     }
 
     pub fn public_snapshot(&self) -> GameSnapshot {
@@ -93,6 +104,60 @@ impl Room {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomSummary {
+    id: RoomId,
+    table_config: TableConfig,
+    seat_count: usize,
+    seated_player_count: usize,
+    can_start_hand: bool,
+    active_phase: Option<GamePhase>,
+}
+
+impl RoomSummary {
+    pub fn new(
+        id: RoomId,
+        table_config: TableConfig,
+        seat_count: usize,
+        seated_player_count: usize,
+        can_start_hand: bool,
+        active_phase: Option<GamePhase>,
+    ) -> Self {
+        Self {
+            id,
+            table_config,
+            seat_count,
+            seated_player_count,
+            can_start_hand,
+            active_phase,
+        }
+    }
+
+    pub fn id(&self) -> RoomId {
+        self.id
+    }
+
+    pub fn table_config(&self) -> TableConfig {
+        self.table_config
+    }
+
+    pub fn seat_count(&self) -> usize {
+        self.seat_count
+    }
+
+    pub fn seated_player_count(&self) -> usize {
+        self.seated_player_count
+    }
+
+    pub fn can_start_hand(&self) -> bool {
+        self.can_start_hand
+    }
+
+    pub fn active_phase(&self) -> Option<GamePhase> {
+        self.active_phase
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomError {
     Engine(GameEngineError),
@@ -145,6 +210,36 @@ impl RoomManager {
 
     pub fn remove_room(&mut self, id: RoomId) -> Option<SharedRoom> {
         self.rooms.remove(&id)
+    }
+
+    pub fn room_summary(&self, id: RoomId) -> Result<RoomSummary, RoomManagerError> {
+        let room = self.room(id).ok_or(RoomManagerError::RoomNotFound { id })?;
+        let locked_room = room
+            .read()
+            .map_err(|_| RoomManagerError::RoomLockPoisoned { id })?;
+
+        Ok(locked_room.summary())
+    }
+
+    pub fn room_summaries(&self) -> Result<Vec<RoomSummary>, RoomManagerError> {
+        let mut summaries = self
+            .rooms
+            .keys()
+            .copied()
+            .map(|id| self.room_summary(id))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        summaries.sort_by_key(|summary| summary.id().0);
+        Ok(summaries)
+    }
+
+    pub fn public_snapshot(&self, id: RoomId) -> Result<GameSnapshot, RoomManagerError> {
+        let room = self.room(id).ok_or(RoomManagerError::RoomNotFound { id })?;
+        let locked_room = room
+            .read()
+            .map_err(|_| RoomManagerError::RoomLockPoisoned { id })?;
+
+        Ok(locked_room.public_snapshot())
     }
 
     pub fn handle_room_command(
@@ -314,6 +409,70 @@ mod tests {
             result.expect_err("missing room should be rejected"),
             RoomManagerError::RoomNotFound { id: RoomId(404) }
         );
+    }
+
+    #[test]
+    fn room_summary_reports_lobby_visible_state() {
+        let mut room = room_with_two_players();
+
+        let summary = room.summary();
+
+        assert_eq!(summary.id(), RoomId(1));
+        assert_eq!(summary.table_config(), table_config());
+        assert_eq!(summary.seat_count(), 6);
+        assert_eq!(summary.seated_player_count(), 2);
+        assert!(summary.can_start_hand());
+        assert_eq!(summary.active_phase(), None);
+
+        room.start_hand(SeatIndex(0))
+            .expect("hand should start through room");
+
+        assert_eq!(room.summary().active_phase(), Some(GamePhase::StartingHand));
+    }
+
+    #[test]
+    fn room_manager_returns_sorted_room_summaries() {
+        let mut manager = RoomManager::new();
+        manager
+            .create_room(RoomId(9), table_config())
+            .expect("room should be created");
+        manager
+            .create_room(RoomId(3), table_config())
+            .expect("room should be created");
+
+        let summaries = manager
+            .room_summaries()
+            .expect("room summaries should be returned");
+
+        assert_eq!(
+            summaries.iter().map(RoomSummary::id).collect::<Vec<_>>(),
+            vec![RoomId(3), RoomId(9)]
+        );
+    }
+
+    #[test]
+    fn room_manager_returns_public_snapshot_for_room() {
+        let mut manager = RoomManager::new();
+        manager
+            .create_room(RoomId(7), table_config())
+            .expect("room should be created");
+        manager
+            .handle_room_command(
+                RoomId(7),
+                RoomCommand::SitPlayer {
+                    id: PlayerId(1),
+                    display_name: "Ada".to_string(),
+                    seat: SeatIndex(0),
+                    buy_in: 1_000,
+                },
+            )
+            .expect("player should sit");
+
+        let snapshot = manager
+            .public_snapshot(RoomId(7))
+            .expect("snapshot should be returned");
+
+        assert_eq!(snapshot.players().len(), 1);
     }
 
     #[test]
