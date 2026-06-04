@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::{
-    Card, Deck, GamePhase, HandState, HandStateError, PlayerError, SeatIndex, Table, TableConfig,
-    TableError,
+    Card, Deck, GamePhase, HandState, HandStateError, PlayerAction, PlayerError, SeatIndex, Table,
+    TableConfig, TableError,
 };
 
 #[derive(Debug, Clone)]
@@ -186,6 +186,34 @@ impl GameEngine {
         Ok(hand)
     }
 
+    pub fn apply_player_action(
+        &mut self,
+        seat: SeatIndex,
+        _action: PlayerAction,
+    ) -> Result<(), GameEngineError> {
+        let hand = self
+            .current_hand
+            .as_ref()
+            .ok_or(GameEngineError::NoActiveHand)?;
+
+        if !hand.phase().is_betting_phase() {
+            return Err(GameEngineError::InvalidPhaseForPlayerAction {
+                actual: hand.phase(),
+            });
+        }
+
+        let acting_seat = hand.acting_seat().ok_or(GameEngineError::NoActingPlayer)?;
+
+        if seat != acting_seat {
+            return Err(GameEngineError::NotPlayersTurn {
+                expected: acting_seat,
+                actual: seat,
+            });
+        }
+
+        Ok(())
+    }
+
     fn ensure_hand_phase(&self, expected: GamePhase) -> Result<(), GameEngineError> {
         let hand = self
             .current_hand
@@ -221,6 +249,7 @@ impl GameEngine {
 pub enum GameEngineError {
     NoActiveHand,
     NoActiveDeck,
+    NoActingPlayer,
     HandAlreadyInProgress,
     NotEnoughPlayersToStartHand,
     DeckExhausted,
@@ -234,6 +263,13 @@ pub enum GameEngineError {
     InvalidPhaseForFinishingHand {
         actual: GamePhase,
     },
+    InvalidPhaseForPlayerAction {
+        actual: GamePhase,
+    },
+    NotPlayersTurn {
+        expected: SeatIndex,
+        actual: SeatIndex,
+    },
     Table(TableError),
     Player(PlayerError),
     HandState(HandStateError),
@@ -244,6 +280,7 @@ impl fmt::Display for GameEngineError {
         match self {
             Self::NoActiveHand => write!(f, "no active hand"),
             Self::NoActiveDeck => write!(f, "no active deck"),
+            Self::NoActingPlayer => write!(f, "no acting player"),
             Self::HandAlreadyInProgress => write!(f, "a hand is already in progress"),
             Self::NotEnoughPlayersToStartHand => write!(f, "not enough players to start hand"),
             Self::DeckExhausted => write!(f, "deck does not have enough cards"),
@@ -258,6 +295,16 @@ impl fmt::Display for GameEngineError {
             }
             Self::InvalidPhaseForFinishingHand { actual } => {
                 write!(f, "cannot finish hand in phase {actual:?}")
+            }
+            Self::InvalidPhaseForPlayerAction { actual } => {
+                write!(f, "cannot apply player action in phase {actual:?}")
+            }
+            Self::NotPlayersTurn { expected, actual } => {
+                write!(
+                    f,
+                    "not player {}'s turn; expected seat {}",
+                    actual.0, expected.0
+                )
             }
             Self::Table(error) => write!(f, "{error}"),
             Self::Player(error) => write!(f, "{error}"),
@@ -627,6 +674,53 @@ mod tests {
                 .expect("player should be seated")
                 .hole_cards()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn player_action_requires_active_hand() {
+        let mut engine = engine();
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Check),
+            Err(GameEngineError::NoActiveHand)
+        );
+    }
+
+    #[test]
+    fn player_action_requires_betting_phase() {
+        let mut engine = engine_with_started_hand();
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Check),
+            Err(GameEngineError::InvalidPhaseForPlayerAction {
+                actual: GamePhase::StartingHand,
+            })
+        );
+    }
+
+    #[test]
+    fn player_action_rejects_non_acting_seat() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(3), PlayerAction::Check),
+            Err(GameEngineError::NotPlayersTurn {
+                expected: SeatIndex(0),
+                actual: SeatIndex(3),
+            })
+        );
+    }
+
+    #[test]
+    fn acting_player_can_apply_action_in_betting_phase() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Check),
+            Ok(())
         );
     }
 

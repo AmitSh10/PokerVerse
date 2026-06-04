@@ -30,6 +30,10 @@ impl GamePhase {
             Self::HandComplete => None,
         }
     }
+
+    pub fn is_betting_phase(self) -> bool {
+        matches!(self, Self::PreFlop | Self::Flop | Self::Turn | Self::River)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +292,18 @@ mod tests {
             hand.advance_phase(),
             Err(HandStateError::HandAlreadyComplete)
         );
+    }
+
+    #[test]
+    fn game_phase_identifies_betting_phases() {
+        assert!(!GamePhase::StartingHand.is_betting_phase());
+        assert!(!GamePhase::PostingBlinds.is_betting_phase());
+        assert!(GamePhase::PreFlop.is_betting_phase());
+        assert!(GamePhase::Flop.is_betting_phase());
+        assert!(GamePhase::Turn.is_betting_phase());
+        assert!(GamePhase::River.is_betting_phase());
+        assert!(!GamePhase::Showdown.is_betting_phase());
+        assert!(!GamePhase::HandComplete.is_betting_phase());
     }
 
     #[test]
