@@ -130,6 +130,10 @@ impl Player {
         self.status = PlayerStatus::SittingOut;
     }
 
+    pub fn sit_in(&mut self) {
+        self.status = PlayerStatus::Active;
+    }
+
     pub fn disconnect(&mut self) {
         self.status = PlayerStatus::Disconnected;
     }
@@ -304,6 +308,19 @@ mod tests {
         player.fold();
 
         assert!(!player.can_play_hand());
+    }
+
+    #[test]
+    fn sitting_out_player_can_sit_back_in() {
+        let mut player = player();
+
+        player.sit_out();
+        assert_eq!(player.status(), PlayerStatus::SittingOut);
+
+        player.sit_in();
+
+        assert_eq!(player.status(), PlayerStatus::Active);
+        assert!(player.can_play_hand());
     }
 
     #[test]

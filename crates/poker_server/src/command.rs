@@ -14,6 +14,12 @@ pub enum RoomCommand {
     LeaveSeat {
         seat: SeatIndex,
     },
+    SitOut {
+        seat: SeatIndex,
+    },
+    SitIn {
+        seat: SeatIndex,
+    },
     StartHand {
         dealer_seat: SeatIndex,
     },
@@ -63,6 +69,14 @@ impl Room {
             }
             RoomCommand::LeaveSeat { seat } => {
                 self.leave_seat(seat)?;
+                (self.drain_events(), self.public_snapshot())
+            }
+            RoomCommand::SitOut { seat } => {
+                self.sit_out(seat)?;
+                (self.drain_events(), self.public_snapshot())
+            }
+            RoomCommand::SitIn { seat } => {
+                self.sit_in(seat)?;
                 (self.drain_events(), self.public_snapshot())
             }
             RoomCommand::StartHand { dealer_seat } => {
@@ -158,6 +172,44 @@ mod tests {
         let result = room.handle_command(RoomCommand::LeaveSeat { seat: SeatIndex(5) });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn sit_out_command_keeps_player_seated_but_unready() {
+        let mut room = room_with_two_players();
+
+        let result = room
+            .handle_command(RoomCommand::SitOut { seat: SeatIndex(0) })
+            .expect("player should sit out");
+
+        assert!(result.events().is_empty());
+        let player = result
+            .snapshot()
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("player should remain seated");
+        assert_eq!(player.status(), poker_engine::PlayerStatus::SittingOut);
+    }
+
+    #[test]
+    fn sit_in_command_marks_player_active_again() {
+        let mut room = room_with_two_players();
+        room.handle_command(RoomCommand::SitOut { seat: SeatIndex(0) })
+            .expect("player should sit out");
+
+        let result = room
+            .handle_command(RoomCommand::SitIn { seat: SeatIndex(0) })
+            .expect("player should sit in");
+
+        assert!(result.events().is_empty());
+        let player = result
+            .snapshot()
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("player should remain seated");
+        assert_eq!(player.status(), poker_engine::PlayerStatus::Active);
     }
 
     #[test]

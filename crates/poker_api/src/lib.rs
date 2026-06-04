@@ -722,6 +722,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_endpoint_handles_sit_out_and_sit_in_commands() {
+        let app = app(ApiState::default());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms",
+                CreateRoomRequest {
+                    id: RoomId(7),
+                    table_config: table_config(),
+                },
+            ))
+            .await
+            .expect("create room request should succeed");
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::SitPlayer {
+                    id: PlayerId(1),
+                    display_name: "Ada".to_string(),
+                    seat: SeatIndex(0),
+                    buy_in: 1_000,
+                },
+            ))
+            .await
+            .expect("sit player request should succeed");
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::SitOut { seat: SeatIndex(0) },
+            ))
+            .await
+            .expect("sit out request should succeed");
+        let result = response_json::<RoomCommandResult>(response).await;
+        assert_eq!(
+            result.snapshot().players()[0].status(),
+            poker_engine::PlayerStatus::SittingOut
+        );
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::SitIn { seat: SeatIndex(0) },
+            ))
+            .await
+            .expect("sit in request should succeed");
+        let result = response_json::<RoomCommandResult>(response).await;
+        assert_eq!(
+            result.snapshot().players()[0].status(),
+            poker_engine::PlayerStatus::Active
+        );
+    }
+
+    #[tokio::test]
     async fn command_endpoint_broadcasts_result_to_room_subscribers() {
         let state = ApiState::default();
         let app = app(state.clone());

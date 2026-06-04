@@ -6,7 +6,7 @@ use std::{
 
 use poker_engine::{
     ChipAmount, GameEngine, GameEngineError, GameEvent, GamePhase, GameSnapshot, PlayerAction,
-    PlayerId, SeatIndex, TableConfig,
+    PlayerId, SeatIndex, TableConfig, TableError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,28 @@ impl Room {
             .table_mut()
             .leave_seat(seat)
             .map_err(GameEngineError::from)?;
+
+        Ok(())
+    }
+
+    pub fn sit_out(&mut self, seat: SeatIndex) -> Result<(), RoomError> {
+        self.engine
+            .table_mut()
+            .player_at_mut(seat)
+            .ok_or(TableError::SeatEmpty { seat })
+            .map_err(GameEngineError::from)?
+            .sit_out();
+
+        Ok(())
+    }
+
+    pub fn sit_in(&mut self, seat: SeatIndex) -> Result<(), RoomError> {
+        self.engine
+            .table_mut()
+            .player_at_mut(seat)
+            .ok_or(TableError::SeatEmpty { seat })
+            .map_err(GameEngineError::from)?
+            .sit_in();
 
         Ok(())
     }
@@ -486,6 +508,37 @@ mod tests {
         assert_eq!(room.public_snapshot().players().len(), 1);
         assert_eq!(room.summary().seated_player_count(), 1);
         assert!(!room.summary().can_start_hand());
+    }
+
+    #[test]
+    fn room_sit_out_and_sit_in_update_player_readiness() {
+        let mut room = room_with_two_players();
+
+        room.sit_out(SeatIndex(0))
+            .expect("player should be able to sit out");
+
+        let player = room
+            .public_snapshot()
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("player should stay seated")
+            .clone();
+        assert_eq!(player.status(), poker_engine::PlayerStatus::SittingOut);
+        assert!(!room.summary().can_start_hand());
+
+        room.sit_in(SeatIndex(0))
+            .expect("player should be able to sit in");
+
+        let player = room
+            .public_snapshot()
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("player should stay seated")
+            .clone();
+        assert_eq!(player.status(), poker_engine::PlayerStatus::Active);
+        assert!(room.summary().can_start_hand());
     }
 
     #[test]
