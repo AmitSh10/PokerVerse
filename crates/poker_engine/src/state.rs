@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{Card, ChipAmount, HandPositions, SeatIndex};
@@ -45,6 +45,7 @@ pub struct HandState {
     pot: ChipAmount,
     contributions: HashMap<SeatIndex, ChipAmount>,
     round_contributions: HashMap<SeatIndex, ChipAmount>,
+    acted_this_round: HashSet<SeatIndex>,
     current_bet: ChipAmount,
 }
 
@@ -61,6 +62,7 @@ impl HandState {
             pot: 0,
             contributions: HashMap::new(),
             round_contributions: HashMap::new(),
+            acted_this_round: HashSet::new(),
             current_bet: 0,
         }
     }
@@ -122,6 +124,18 @@ impl HandState {
         self.acting_seat = acting_seat;
     }
 
+    pub fn mark_player_acted(&mut self, seat: SeatIndex) {
+        self.acted_this_round.insert(seat);
+    }
+
+    pub fn has_player_acted_this_round(&self, seat: SeatIndex) -> bool {
+        self.acted_this_round.contains(&seat)
+    }
+
+    pub fn reset_round_actions(&mut self) {
+        self.acted_this_round.clear();
+    }
+
     pub fn record_contribution(&mut self, seat: SeatIndex, amount: ChipAmount) {
         let contribution = self.contributions.entry(seat).or_insert(0);
         *contribution += amount;
@@ -156,6 +170,7 @@ impl HandState {
 
     fn reset_round_betting(&mut self) {
         self.round_contributions.clear();
+        self.reset_round_actions();
         self.current_bet = 0;
     }
 
@@ -294,6 +309,7 @@ mod tests {
         assert_eq!(hand.acting_seat(), None);
         assert_eq!(hand.pot(), 0);
         assert_eq!(hand.current_bet(), 0);
+        assert!(!hand.has_player_acted_this_round(SeatIndex(1)));
         assert!(hand.board().is_empty());
     }
 
@@ -339,6 +355,19 @@ mod tests {
         assert_eq!(hand.round_contribution_for(SeatIndex(2)), 0);
         assert_eq!(hand.current_bet(), 0);
         assert_eq!(hand.pot(), 15);
+    }
+
+    #[test]
+    fn round_actions_can_be_marked_and_reset() {
+        let mut hand = HandState::new(positions());
+
+        hand.mark_player_acted(SeatIndex(1));
+        assert!(hand.has_player_acted_this_round(SeatIndex(1)));
+        assert!(!hand.has_player_acted_this_round(SeatIndex(2)));
+
+        hand.reset_round_actions();
+
+        assert!(!hand.has_player_acted_this_round(SeatIndex(1)));
     }
 
     #[test]

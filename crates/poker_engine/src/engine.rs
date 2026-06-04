@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     Card, ChipAmount, Deck, GamePhase, HandState, HandStateError, PlayerAction, PlayerError,
-    SeatIndex, Table, TableConfig, TableError,
+    PlayerStatus, SeatIndex, Table, TableConfig, TableError,
 };
 
 #[derive(Debug, Clone)]
@@ -199,7 +199,8 @@ impl GameEngine {
                     .player_at_mut(seat)
                     .ok_or(TableError::SeatEmpty { seat })?
                     .fold();
-                self.advance_action_to_next_playing_seat_after(seat)?;
+                self.current_hand_mut()?.mark_player_acted(seat);
+                self.complete_round_or_advance_action_after(seat)?;
             }
             PlayerAction::Check => {
                 let amount_to_call = self
@@ -212,7 +213,8 @@ impl GameEngine {
                     return Err(GameEngineError::CannotCheckFacingBet { amount_to_call });
                 }
 
-                self.advance_action_to_next_playing_seat_after(seat)?;
+                self.current_hand_mut()?.mark_player_acted(seat);
+                self.complete_round_or_advance_action_after(seat)?;
             }
             PlayerAction::Call => {
                 let amount_to_call = self
@@ -233,7 +235,8 @@ impl GameEngine {
 
                 self.current_hand_mut()?
                     .record_contribution(seat, committed);
-                self.advance_action_to_next_playing_seat_after(seat)?;
+                self.current_hand_mut()?.mark_player_acted(seat);
+                self.complete_round_or_advance_action_after(seat)?;
             }
             PlayerAction::Bet { amount } => {
                 let current_bet = self
@@ -263,7 +266,9 @@ impl GameEngine {
 
                 self.current_hand_mut()?
                     .record_contribution(seat, committed);
-                self.advance_action_to_next_playing_seat_after(seat)?;
+                self.current_hand_mut()?.reset_round_actions();
+                self.current_hand_mut()?.mark_player_acted(seat);
+                self.complete_round_or_advance_action_after(seat)?;
             }
             PlayerAction::Raise { amount } => {
                 let (current_bet, round_contribution) = {
@@ -297,9 +302,16 @@ impl GameEngine {
 
                 self.current_hand_mut()?
                     .record_contribution(seat, committed);
-                self.advance_action_to_next_playing_seat_after(seat)?;
+                self.current_hand_mut()?.reset_round_actions();
+                self.current_hand_mut()?.mark_player_acted(seat);
+                self.complete_round_or_advance_action_after(seat)?;
             }
             PlayerAction::AllIn => {
+                let current_bet = self
+                    .current_hand
+                    .as_ref()
+                    .expect("turn validation guarantees an active hand")
+                    .current_bet();
                 let committed = self
                     .table
                     .player_at_mut(seat)
@@ -308,7 +320,19 @@ impl GameEngine {
 
                 self.current_hand_mut()?
                     .record_contribution(seat, committed);
-                self.advance_action_to_next_playing_seat_after(seat)?;
+
+                if self
+                    .current_hand
+                    .as_ref()
+                    .expect("active hand still exists after all-in")
+                    .current_bet()
+                    > current_bet
+                {
+                    self.current_hand_mut()?.reset_round_actions();
+                }
+
+                self.current_hand_mut()?.mark_player_acted(seat);
+                self.complete_round_or_advance_action_after(seat)?;
             }
         }
 
@@ -339,10 +363,31 @@ impl GameEngine {
         Ok(())
     }
 
-    fn advance_action_to_next_playing_seat_after(
+    fn complete_round_or_advance_action_after(
         &mut self,
         seat: SeatIndex,
     ) -> Result<(), GameEngineError> {
+        if self.remaining_contesting_player_count() <= 1 {
+            self.current_hand_mut()?.set_acting_seat(None);
+            return Ok(());
+        }
+
+        if self.is_betting_round_complete()? {
+            let next_phase = self.advance_hand_phase()?;
+
+            if matches!(
+                next_phase,
+                GamePhase::Flop | GamePhase::Turn | GamePhase::River
+            ) {
+                let next_acting_seat = self.first_postflop_acting_seat()?;
+                self.current_hand_mut()?.set_acting_seat(next_acting_seat);
+            } else {
+                self.current_hand_mut()?.set_acting_seat(None);
+            }
+
+            return Ok(());
+        }
+
         let next_acting_seat = if self.table.playing_seats().len() > 1 {
             self.table.next_playing_seat_after(seat)?
         } else {
@@ -351,6 +396,46 @@ impl GameEngine {
 
         self.current_hand_mut()?.set_acting_seat(next_acting_seat);
         Ok(())
+    }
+
+    fn is_betting_round_complete(&self) -> Result<bool, GameEngineError> {
+        let hand = self
+            .current_hand
+            .as_ref()
+            .ok_or(GameEngineError::NoActiveHand)?;
+        let acting_seats = self.table.playing_seats();
+
+        if acting_seats.is_empty() {
+            return Ok(true);
+        }
+
+        Ok(acting_seats
+            .into_iter()
+            .all(|seat| hand.amount_to_call(seat) == 0 && hand.has_player_acted_this_round(seat)))
+    }
+
+    fn remaining_contesting_player_count(&self) -> usize {
+        self.table
+            .occupied_seats()
+            .into_iter()
+            .filter(|seat| {
+                self.table.player_at(*seat).is_some_and(|player| {
+                    matches!(player.status(), PlayerStatus::Active | PlayerStatus::AllIn)
+                })
+            })
+            .count()
+    }
+
+    fn first_postflop_acting_seat(&self) -> Result<Option<SeatIndex>, GameEngineError> {
+        let dealer_seat = self
+            .current_hand
+            .as_ref()
+            .ok_or(GameEngineError::NoActiveHand)?
+            .dealer_seat();
+
+        self.table
+            .next_playing_seat_after(dealer_seat)
+            .map_err(GameEngineError::Table)
     }
 
     fn ensure_hand_phase(&self, expected: GamePhase) -> Result<(), GameEngineError> {
@@ -1032,6 +1117,28 @@ mod tests {
     }
 
     #[test]
+    fn preflop_betting_round_completion_advances_to_flop() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        advance_to(&mut engine, GamePhase::PreFlop);
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Call)
+            .expect("small blind should call");
+
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Check)
+            .expect("big blind should check");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Flop);
+        assert_eq!(hand.current_bet(), 0);
+        assert_eq!(hand.round_contribution_for(SeatIndex(0)), 0);
+        assert_eq!(hand.round_contribution_for(SeatIndex(3)), 0);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+    }
+
+    #[test]
     fn bet_starts_new_betting_round_and_advances_action() {
         let mut engine = engine_with_three_players_started_hand();
         advance_to(&mut engine, GamePhase::Flop);
@@ -1054,6 +1161,56 @@ mod tests {
                 .stack(),
             975
         );
+    }
+
+    #[test]
+    fn checking_around_completes_postflop_betting_round() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Check)
+            .expect("first player should check");
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Check)
+            .expect("second player should check");
+        engine
+            .apply_player_action(SeatIndex(5), PlayerAction::Check)
+            .expect("third player should check");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Turn);
+        assert_eq!(hand.current_bet(), 0);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+    }
+
+    #[test]
+    fn bet_resets_prior_checks_so_everyone_can_respond() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Check)
+            .expect("first player should check");
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Bet { amount: 25 })
+            .expect("second player should bet");
+
+        engine
+            .apply_player_action(SeatIndex(5), PlayerAction::Call)
+            .expect("third player should call");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Flop);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(0)));
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Call)
+            .expect("first player should get a chance to answer the bet");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Turn);
+        assert_eq!(hand.current_bet(), 0);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
     }
 
     #[test]
