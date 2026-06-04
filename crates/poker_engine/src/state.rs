@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fmt;
 
-use crate::{Card, HandPositions, SeatIndex};
+use crate::{Card, ChipAmount, HandPositions, SeatIndex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -37,6 +38,8 @@ pub struct HandState {
     positions: HandPositions,
     acting_seat: Option<SeatIndex>,
     board: Vec<Card>,
+    pot: ChipAmount,
+    contributions: HashMap<SeatIndex, ChipAmount>,
 }
 
 impl HandState {
@@ -49,6 +52,8 @@ impl HandState {
             positions,
             acting_seat: None,
             board: Vec::with_capacity(Self::MAX_BOARD_CARDS),
+            pot: 0,
+            contributions: HashMap::new(),
         }
     }
 
@@ -84,8 +89,22 @@ impl HandState {
         &self.board
     }
 
+    pub fn pot(&self) -> ChipAmount {
+        self.pot
+    }
+
+    pub fn contribution_for(&self, seat: SeatIndex) -> ChipAmount {
+        self.contributions.get(&seat).copied().unwrap_or(0)
+    }
+
     pub fn set_acting_seat(&mut self, acting_seat: Option<SeatIndex>) {
         self.acting_seat = acting_seat;
+    }
+
+    pub fn record_contribution(&mut self, seat: SeatIndex, amount: ChipAmount) {
+        let contribution = self.contributions.entry(seat).or_insert(0);
+        *contribution += amount;
+        self.pot += amount;
     }
 
     pub fn advance_phase(&mut self) -> Result<GamePhase, HandStateError> {
@@ -236,7 +255,22 @@ mod tests {
         assert_eq!(hand.big_blind_seat(), SeatIndex(4));
         assert_eq!(hand.first_to_act_seat(), SeatIndex(5));
         assert_eq!(hand.acting_seat(), None);
+        assert_eq!(hand.pot(), 0);
         assert!(hand.board().is_empty());
+    }
+
+    #[test]
+    fn record_contribution_adds_to_player_contribution_and_pot() {
+        let mut hand = HandState::new(positions());
+
+        hand.record_contribution(SeatIndex(1), 5);
+        hand.record_contribution(SeatIndex(2), 10);
+        hand.record_contribution(SeatIndex(1), 15);
+
+        assert_eq!(hand.contribution_for(SeatIndex(1)), 20);
+        assert_eq!(hand.contribution_for(SeatIndex(2)), 10);
+        assert_eq!(hand.contribution_for(SeatIndex(3)), 0);
+        assert_eq!(hand.pot(), 30);
     }
 
     #[test]

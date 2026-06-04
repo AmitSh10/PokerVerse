@@ -84,6 +84,54 @@ impl GameEngine {
 
         hand.advance_phase().map_err(GameEngineError::HandState)
     }
+
+    pub fn post_blinds(&mut self) -> Result<(), GameEngineError> {
+        let (small_blind_seat, big_blind_seat, small_blind_amount, big_blind_amount) = {
+            let hand = self
+                .current_hand
+                .as_ref()
+                .ok_or(GameEngineError::NoActiveHand)?;
+
+            if hand.phase() != GamePhase::PostingBlinds {
+                return Err(GameEngineError::InvalidPhaseForPostingBlinds {
+                    actual: hand.phase(),
+                });
+            }
+
+            (
+                hand.small_blind_seat(),
+                hand.big_blind_seat(),
+                self.table.config().small_blind(),
+                self.table.config().big_blind(),
+            )
+        };
+
+        let small_blind_committed = self
+            .table
+            .player_at_mut(small_blind_seat)
+            .ok_or(TableError::SeatEmpty {
+                seat: small_blind_seat,
+            })?
+            .debit_chips(small_blind_amount)?;
+
+        let big_blind_committed = self
+            .table
+            .player_at_mut(big_blind_seat)
+            .ok_or(TableError::SeatEmpty {
+                seat: big_blind_seat,
+            })?
+            .debit_chips(big_blind_amount)?;
+
+        let hand = self
+            .current_hand
+            .as_mut()
+            .expect("active hand was checked before posting blinds");
+
+        hand.record_contribution(small_blind_seat, small_blind_committed);
+        hand.record_contribution(big_blind_seat, big_blind_committed);
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +140,7 @@ pub enum GameEngineError {
     HandAlreadyInProgress,
     NotEnoughPlayersToStartHand,
     DeckExhausted,
+    InvalidPhaseForPostingBlinds { actual: GamePhase },
     Table(TableError),
     Player(PlayerError),
     HandState(HandStateError),
@@ -104,6 +153,9 @@ impl fmt::Display for GameEngineError {
             Self::HandAlreadyInProgress => write!(f, "a hand is already in progress"),
             Self::NotEnoughPlayersToStartHand => write!(f, "not enough players to start hand"),
             Self::DeckExhausted => write!(f, "deck does not have enough cards"),
+            Self::InvalidPhaseForPostingBlinds { actual } => {
+                write!(f, "cannot post blinds in phase {actual:?}")
+            }
             Self::Table(error) => write!(f, "{error}"),
             Self::Player(error) => write!(f, "{error}"),
             Self::HandState(error) => write!(f, "{error}"),
@@ -268,6 +320,63 @@ mod tests {
         assert_eq!(
             engine.current_hand().and_then(HandState::acting_seat),
             Some(SeatIndex(0))
+        );
+    }
+
+    #[test]
+    fn post_blinds_requires_active_hand() {
+        let mut engine = engine();
+
+        assert_eq!(engine.post_blinds(), Err(GameEngineError::NoActiveHand));
+    }
+
+    #[test]
+    fn post_blinds_requires_posting_blinds_phase() {
+        let mut engine = engine_with_two_players();
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+
+        assert_eq!(
+            engine.post_blinds(),
+            Err(GameEngineError::InvalidPhaseForPostingBlinds {
+                actual: GamePhase::StartingHand,
+            })
+        );
+    }
+
+    #[test]
+    fn post_blinds_debits_players_and_records_pot() {
+        let mut engine = engine_with_two_players();
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+        engine
+            .advance_hand_phase()
+            .expect("hand should enter posting blinds");
+
+        engine.post_blinds().expect("blinds should post");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.contribution_for(SeatIndex(0)), 5);
+        assert_eq!(hand.contribution_for(SeatIndex(3)), 10);
+        assert_eq!(hand.pot(), 15);
+
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("small blind should be seated")
+                .stack(),
+            995
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(3))
+                .expect("big blind should be seated")
+                .stack(),
+            990
         );
     }
 
