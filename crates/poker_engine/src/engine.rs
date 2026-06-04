@@ -162,6 +162,30 @@ impl GameEngine {
         Ok(())
     }
 
+    pub fn finish_hand(&mut self) -> Result<HandState, GameEngineError> {
+        let hand = self
+            .current_hand
+            .take()
+            .ok_or(GameEngineError::NoActiveHand)?;
+
+        if hand.phase() != GamePhase::HandComplete {
+            let actual = hand.phase();
+            self.current_hand = Some(hand);
+
+            return Err(GameEngineError::InvalidPhaseForFinishingHand { actual });
+        }
+
+        self.deck = None;
+
+        for seat in self.table.occupied_seats() {
+            if let Some(player) = self.table.player_at_mut(seat) {
+                player.clear_hole_cards();
+            }
+        }
+
+        Ok(hand)
+    }
+
     fn ensure_hand_phase(&self, expected: GamePhase) -> Result<(), GameEngineError> {
         let hand = self
             .current_hand
@@ -207,6 +231,9 @@ pub enum GameEngineError {
         expected: GamePhase,
         actual: GamePhase,
     },
+    InvalidPhaseForFinishingHand {
+        actual: GamePhase,
+    },
     Table(TableError),
     Player(PlayerError),
     HandState(HandStateError),
@@ -228,6 +255,9 @@ impl fmt::Display for GameEngineError {
                     f,
                     "cannot deal community cards in phase {actual:?}; expected {expected:?}"
                 )
+            }
+            Self::InvalidPhaseForFinishingHand { actual } => {
+                write!(f, "cannot finish hand in phase {actual:?}")
             }
             Self::Table(error) => write!(f, "{error}"),
             Self::Player(error) => write!(f, "{error}"),
@@ -548,6 +578,55 @@ mod tests {
                 .board()
                 .len(),
             HandState::MAX_BOARD_CARDS
+        );
+    }
+
+    #[test]
+    fn finish_hand_requires_active_hand() {
+        let mut engine = engine();
+
+        assert_eq!(engine.finish_hand(), Err(GameEngineError::NoActiveHand));
+    }
+
+    #[test]
+    fn finish_hand_requires_hand_complete_phase_and_keeps_hand_active_on_error() {
+        let mut engine = engine_with_started_hand();
+
+        assert_eq!(
+            engine.finish_hand(),
+            Err(GameEngineError::InvalidPhaseForFinishingHand {
+                actual: GamePhase::StartingHand,
+            })
+        );
+        assert!(engine.current_hand().is_some());
+        assert!(engine.deck().is_some());
+    }
+
+    #[test]
+    fn finish_hand_clears_active_hand_deck_and_hole_cards() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::HandComplete);
+
+        let finished_hand = engine.finish_hand().expect("hand should finish");
+
+        assert_eq!(finished_hand.phase(), GamePhase::HandComplete);
+        assert!(engine.current_hand().is_none());
+        assert!(engine.deck().is_none());
+        assert!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("player should be seated")
+                .hole_cards()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .table()
+                .player_at(SeatIndex(3))
+                .expect("player should be seated")
+                .hole_cards()
+                .is_empty()
         );
     }
 
