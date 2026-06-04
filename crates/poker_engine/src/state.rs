@@ -107,6 +107,12 @@ impl HandState {
         self.contributions.get(&seat).copied().unwrap_or(0)
     }
 
+    pub fn contributions(&self) -> impl Iterator<Item = (SeatIndex, ChipAmount)> + '_ {
+        self.contributions
+            .iter()
+            .map(|(seat, amount)| (*seat, *amount))
+    }
+
     pub fn round_contribution_for(&self, seat: SeatIndex) -> ChipAmount {
         self.round_contributions.get(&seat).copied().unwrap_or(0)
     }
@@ -334,6 +340,11 @@ mod tests {
         assert_eq!(hand.round_contribution_for(SeatIndex(2)), 10);
         assert_eq!(hand.current_bet(), 20);
         assert_eq!(hand.pot(), 30);
+        assert_eq!(
+            hand.contributions().collect::<Vec<_>>().len(),
+            2,
+            "contributions iterator should expose seats that committed chips"
+        );
     }
 
     #[test]
