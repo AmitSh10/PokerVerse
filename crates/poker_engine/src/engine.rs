@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    Deck, GamePhase, HandState, HandStateError, PlayerError, SeatIndex, Table, TableConfig,
+    Card, Deck, GamePhase, HandState, HandStateError, PlayerError, SeatIndex, Table, TableConfig,
     TableError,
 };
 
@@ -132,15 +132,81 @@ impl GameEngine {
 
         Ok(())
     }
+
+    pub fn deal_flop(&mut self) -> Result<(), GameEngineError> {
+        self.ensure_hand_phase(GamePhase::Flop)?;
+
+        let cards = [
+            self.deal_one_from_deck()?,
+            self.deal_one_from_deck()?,
+            self.deal_one_from_deck()?,
+        ];
+
+        self.current_hand_mut()?.reveal_flop(cards)?;
+        Ok(())
+    }
+
+    pub fn deal_turn(&mut self) -> Result<(), GameEngineError> {
+        self.ensure_hand_phase(GamePhase::Turn)?;
+        let card = self.deal_one_from_deck()?;
+
+        self.current_hand_mut()?.reveal_turn(card)?;
+        Ok(())
+    }
+
+    pub fn deal_river(&mut self) -> Result<(), GameEngineError> {
+        self.ensure_hand_phase(GamePhase::River)?;
+        let card = self.deal_one_from_deck()?;
+
+        self.current_hand_mut()?.reveal_river(card)?;
+        Ok(())
+    }
+
+    fn ensure_hand_phase(&self, expected: GamePhase) -> Result<(), GameEngineError> {
+        let hand = self
+            .current_hand
+            .as_ref()
+            .ok_or(GameEngineError::NoActiveHand)?;
+
+        if hand.phase() != expected {
+            return Err(GameEngineError::InvalidPhaseForCommunityCards {
+                expected,
+                actual: hand.phase(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn current_hand_mut(&mut self) -> Result<&mut HandState, GameEngineError> {
+        self.current_hand
+            .as_mut()
+            .ok_or(GameEngineError::NoActiveHand)
+    }
+
+    fn deal_one_from_deck(&mut self) -> Result<Card, GameEngineError> {
+        self.deck
+            .as_mut()
+            .ok_or(GameEngineError::NoActiveDeck)?
+            .deal_one()
+            .ok_or(GameEngineError::DeckExhausted)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameEngineError {
     NoActiveHand,
+    NoActiveDeck,
     HandAlreadyInProgress,
     NotEnoughPlayersToStartHand,
     DeckExhausted,
-    InvalidPhaseForPostingBlinds { actual: GamePhase },
+    InvalidPhaseForPostingBlinds {
+        actual: GamePhase,
+    },
+    InvalidPhaseForCommunityCards {
+        expected: GamePhase,
+        actual: GamePhase,
+    },
     Table(TableError),
     Player(PlayerError),
     HandState(HandStateError),
@@ -150,11 +216,18 @@ impl fmt::Display for GameEngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoActiveHand => write!(f, "no active hand"),
+            Self::NoActiveDeck => write!(f, "no active deck"),
             Self::HandAlreadyInProgress => write!(f, "a hand is already in progress"),
             Self::NotEnoughPlayersToStartHand => write!(f, "not enough players to start hand"),
             Self::DeckExhausted => write!(f, "deck does not have enough cards"),
             Self::InvalidPhaseForPostingBlinds { actual } => {
                 write!(f, "cannot post blinds in phase {actual:?}")
+            }
+            Self::InvalidPhaseForCommunityCards { expected, actual } => {
+                write!(
+                    f,
+                    "cannot deal community cards in phase {actual:?}; expected {expected:?}"
+                )
             }
             Self::Table(error) => write!(f, "{error}"),
             Self::Player(error) => write!(f, "{error}"),
@@ -174,6 +247,12 @@ impl From<TableError> for GameEngineError {
 impl From<PlayerError> for GameEngineError {
     fn from(error: PlayerError) -> Self {
         Self::Player(error)
+    }
+}
+
+impl From<HandStateError> for GameEngineError {
+    fn from(error: HandStateError) -> Self {
+        Self::HandState(error)
     }
 }
 
@@ -202,6 +281,27 @@ mod tests {
             .sit_player(PlayerId(2), "Grace", SeatIndex(3), 1_000)
             .expect("second player should sit");
         engine
+    }
+
+    fn engine_with_started_hand() -> GameEngine {
+        let mut engine = engine_with_two_players();
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+        engine
+    }
+
+    fn advance_to(engine: &mut GameEngine, phase: GamePhase) {
+        while engine
+            .current_hand()
+            .expect("hand should be active")
+            .phase()
+            != phase
+        {
+            engine
+                .advance_hand_phase()
+                .expect("phase should advance before hand is complete");
+        }
     }
 
     #[test]
@@ -377,6 +477,77 @@ mod tests {
                 .expect("big blind should be seated")
                 .stack(),
             990
+        );
+    }
+
+    #[test]
+    fn deal_flop_requires_active_hand() {
+        let mut engine = engine();
+
+        assert_eq!(engine.deal_flop(), Err(GameEngineError::NoActiveHand));
+    }
+
+    #[test]
+    fn deal_flop_requires_flop_phase_and_does_not_burn_cards() {
+        let mut engine = engine_with_started_hand();
+        let deck_len_before = engine.deck().map(Deck::len);
+
+        assert_eq!(
+            engine.deal_flop(),
+            Err(GameEngineError::InvalidPhaseForCommunityCards {
+                expected: GamePhase::Flop,
+                actual: GamePhase::StartingHand,
+            })
+        );
+        assert_eq!(engine.deck().map(Deck::len), deck_len_before);
+        assert_eq!(
+            engine
+                .current_hand()
+                .expect("hand should be active")
+                .board()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn deal_flop_places_three_cards_on_board() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+        let deck_len_before = engine.deck().map(Deck::len).expect("deck should exist");
+
+        engine.deal_flop().expect("flop should deal");
+
+        assert_eq!(
+            engine
+                .current_hand()
+                .expect("hand should be active")
+                .board()
+                .len(),
+            3
+        );
+        assert_eq!(engine.deck().map(Deck::len), Some(deck_len_before - 3));
+    }
+
+    #[test]
+    fn deal_turn_and_river_complete_the_board() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+        engine.deal_flop().expect("flop should deal");
+
+        advance_to(&mut engine, GamePhase::Turn);
+        engine.deal_turn().expect("turn should deal");
+
+        advance_to(&mut engine, GamePhase::River);
+        engine.deal_river().expect("river should deal");
+
+        assert_eq!(
+            engine
+                .current_hand()
+                .expect("hand should be active")
+                .board()
+                .len(),
+            HandState::MAX_BOARD_CARDS
         );
     }
 
