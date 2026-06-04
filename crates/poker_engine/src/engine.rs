@@ -189,8 +189,33 @@ impl GameEngine {
     pub fn apply_player_action(
         &mut self,
         seat: SeatIndex,
-        _action: PlayerAction,
+        action: PlayerAction,
     ) -> Result<(), GameEngineError> {
+        self.validate_player_action_turn(seat)?;
+
+        match action {
+            PlayerAction::Fold => {
+                self.table
+                    .player_at_mut(seat)
+                    .ok_or(TableError::SeatEmpty { seat })?
+                    .fold();
+                self.advance_action_to_next_playing_seat_after(seat)?;
+            }
+            PlayerAction::Check => {
+                self.advance_action_to_next_playing_seat_after(seat)?;
+            }
+            PlayerAction::Call
+            | PlayerAction::Bet { .. }
+            | PlayerAction::Raise { .. }
+            | PlayerAction::AllIn => {
+                return Err(GameEngineError::UnsupportedPlayerAction { action });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_player_action_turn(&self, seat: SeatIndex) -> Result<(), GameEngineError> {
         let hand = self
             .current_hand
             .as_ref()
@@ -211,6 +236,20 @@ impl GameEngine {
             });
         }
 
+        Ok(())
+    }
+
+    fn advance_action_to_next_playing_seat_after(
+        &mut self,
+        seat: SeatIndex,
+    ) -> Result<(), GameEngineError> {
+        let next_acting_seat = if self.table.playing_seats().len() > 1 {
+            self.table.next_playing_seat_after(seat)?
+        } else {
+            None
+        };
+
+        self.current_hand_mut()?.set_acting_seat(next_acting_seat);
         Ok(())
     }
 
@@ -270,6 +309,9 @@ pub enum GameEngineError {
         expected: SeatIndex,
         actual: SeatIndex,
     },
+    UnsupportedPlayerAction {
+        action: PlayerAction,
+    },
     Table(TableError),
     Player(PlayerError),
     HandState(HandStateError),
@@ -305,6 +347,9 @@ impl fmt::Display for GameEngineError {
                     "not player {}'s turn; expected seat {}",
                     actual.0, expected.0
                 )
+            }
+            Self::UnsupportedPlayerAction { action } => {
+                write!(f, "player action {action:?} is not supported yet")
             }
             Self::Table(error) => write!(f, "{error}"),
             Self::Player(error) => write!(f, "{error}"),
@@ -365,6 +410,18 @@ mod tests {
         engine
             .start_hand(SeatIndex(0))
             .expect("hand should start with two players");
+        engine
+    }
+
+    fn engine_with_three_players_started_hand() -> GameEngine {
+        let mut engine = engine_with_two_players();
+        engine
+            .table_mut()
+            .sit_player(PlayerId(3), "Linus", SeatIndex(5), 1_000)
+            .expect("third player should sit");
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with three players");
         engine
     }
 
@@ -721,6 +778,69 @@ mod tests {
         assert_eq!(
             engine.apply_player_action(SeatIndex(0), PlayerAction::Check),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn check_advances_action_to_next_playing_seat() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Check)
+            .expect("acting player should be able to check in placeholder betting logic");
+
+        assert_eq!(
+            engine.current_hand().and_then(HandState::acting_seat),
+            Some(SeatIndex(3))
+        );
+    }
+
+    #[test]
+    fn fold_marks_player_folded_and_advances_action() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Fold)
+            .expect("acting player should be able to fold");
+
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("player should be seated")
+                .status(),
+            crate::PlayerStatus::Folded
+        );
+        assert_eq!(
+            engine.current_hand().and_then(HandState::acting_seat),
+            Some(SeatIndex(3))
+        );
+    }
+
+    #[test]
+    fn folding_heads_up_clears_acting_seat_when_only_one_player_remains() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Fold)
+            .expect("acting player should be able to fold");
+
+        assert_eq!(engine.current_hand().and_then(HandState::acting_seat), None);
+    }
+
+    #[test]
+    fn unsupported_betting_actions_return_explicit_error() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Call),
+            Err(GameEngineError::UnsupportedPlayerAction {
+                action: PlayerAction::Call,
+            })
         );
     }
 
