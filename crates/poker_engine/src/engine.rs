@@ -374,6 +374,7 @@ impl GameEngine {
 
         if self.is_betting_round_complete()? {
             let next_phase = self.advance_hand_phase()?;
+            self.deal_board_cards_for_current_phase(next_phase)?;
 
             if matches!(
                 next_phase,
@@ -396,6 +397,18 @@ impl GameEngine {
 
         self.current_hand_mut()?.set_acting_seat(next_acting_seat);
         Ok(())
+    }
+
+    fn deal_board_cards_for_current_phase(
+        &mut self,
+        phase: GamePhase,
+    ) -> Result<(), GameEngineError> {
+        match phase {
+            GamePhase::Flop => self.deal_flop(),
+            GamePhase::Turn => self.deal_turn(),
+            GamePhase::River => self.deal_river(),
+            _ => Ok(()),
+        }
     }
 
     fn is_betting_round_complete(&self) -> Result<bool, GameEngineError> {
@@ -1132,10 +1145,67 @@ mod tests {
 
         let hand = engine.current_hand().expect("hand should be active");
         assert_eq!(hand.phase(), GamePhase::Flop);
+        assert_eq!(hand.board().len(), 3);
         assert_eq!(hand.current_bet(), 0);
         assert_eq!(hand.round_contribution_for(SeatIndex(0)), 0);
         assert_eq!(hand.round_contribution_for(SeatIndex(3)), 0);
         assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+    }
+
+    #[test]
+    fn completed_betting_rounds_deal_board_cards_through_showdown() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Call)
+            .expect("small blind should call");
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Check)
+            .expect("big blind should check");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Flop);
+        assert_eq!(hand.board().len(), 3);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Check)
+            .expect("first postflop player should check");
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Check)
+            .expect("second postflop player should check");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Turn);
+        assert_eq!(hand.board().len(), 4);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Check)
+            .expect("turn first player should check");
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Check)
+            .expect("turn second player should check");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::River);
+        assert_eq!(hand.board().len(), HandState::MAX_BOARD_CARDS);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+
+        engine
+            .apply_player_action(SeatIndex(3), PlayerAction::Check)
+            .expect("river first player should check");
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Check)
+            .expect("river second player should check");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.phase(), GamePhase::Showdown);
+        assert_eq!(hand.board().len(), HandState::MAX_BOARD_CARDS);
+        assert_eq!(hand.acting_seat(), None);
     }
 
     #[test]
@@ -1167,6 +1237,7 @@ mod tests {
     fn checking_around_completes_postflop_betting_round() {
         let mut engine = engine_with_three_players_started_hand();
         advance_to(&mut engine, GamePhase::Flop);
+        engine.deal_flop().expect("flop should deal");
 
         engine
             .apply_player_action(SeatIndex(0), PlayerAction::Check)
@@ -1180,6 +1251,7 @@ mod tests {
 
         let hand = engine.current_hand().expect("hand should be active");
         assert_eq!(hand.phase(), GamePhase::Turn);
+        assert_eq!(hand.board().len(), 4);
         assert_eq!(hand.current_bet(), 0);
         assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
     }
@@ -1188,6 +1260,7 @@ mod tests {
     fn bet_resets_prior_checks_so_everyone_can_respond() {
         let mut engine = engine_with_three_players_started_hand();
         advance_to(&mut engine, GamePhase::Flop);
+        engine.deal_flop().expect("flop should deal");
         engine
             .apply_player_action(SeatIndex(0), PlayerAction::Check)
             .expect("first player should check");
@@ -1209,6 +1282,7 @@ mod tests {
 
         let hand = engine.current_hand().expect("hand should be active");
         assert_eq!(hand.phase(), GamePhase::Turn);
+        assert_eq!(hand.board().len(), 4);
         assert_eq!(hand.current_bet(), 0);
         assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
     }
