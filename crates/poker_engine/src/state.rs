@@ -44,6 +44,8 @@ pub struct HandState {
     board: Vec<Card>,
     pot: ChipAmount,
     contributions: HashMap<SeatIndex, ChipAmount>,
+    round_contributions: HashMap<SeatIndex, ChipAmount>,
+    current_bet: ChipAmount,
 }
 
 impl HandState {
@@ -58,6 +60,8 @@ impl HandState {
             board: Vec::with_capacity(Self::MAX_BOARD_CARDS),
             pot: 0,
             contributions: HashMap::new(),
+            round_contributions: HashMap::new(),
+            current_bet: 0,
         }
     }
 
@@ -101,6 +105,19 @@ impl HandState {
         self.contributions.get(&seat).copied().unwrap_or(0)
     }
 
+    pub fn round_contribution_for(&self, seat: SeatIndex) -> ChipAmount {
+        self.round_contributions.get(&seat).copied().unwrap_or(0)
+    }
+
+    pub fn current_bet(&self) -> ChipAmount {
+        self.current_bet
+    }
+
+    pub fn amount_to_call(&self, seat: SeatIndex) -> ChipAmount {
+        self.current_bet
+            .saturating_sub(self.round_contribution_for(seat))
+    }
+
     pub fn set_acting_seat(&mut self, acting_seat: Option<SeatIndex>) {
         self.acting_seat = acting_seat;
     }
@@ -108,6 +125,11 @@ impl HandState {
     pub fn record_contribution(&mut self, seat: SeatIndex, amount: ChipAmount) {
         let contribution = self.contributions.entry(seat).or_insert(0);
         *contribution += amount;
+
+        let round_contribution = self.round_contributions.entry(seat).or_insert(0);
+        *round_contribution += amount;
+
+        self.current_bet = self.current_bet.max(*round_contribution);
         self.pot += amount;
     }
 
@@ -119,11 +141,22 @@ impl HandState {
 
         self.phase = next_phase;
 
-        if self.phase == GamePhase::PreFlop {
-            self.acting_seat = Some(self.positions.first_to_act());
+        match self.phase {
+            GamePhase::PreFlop => {
+                self.acting_seat = Some(self.positions.first_to_act());
+            }
+            GamePhase::Flop | GamePhase::Turn | GamePhase::River => {
+                self.reset_round_betting();
+            }
+            _ => {}
         }
 
         Ok(self.phase)
+    }
+
+    fn reset_round_betting(&mut self) {
+        self.round_contributions.clear();
+        self.current_bet = 0;
     }
 
     pub fn reveal_flop(
@@ -260,11 +293,12 @@ mod tests {
         assert_eq!(hand.first_to_act_seat(), SeatIndex(5));
         assert_eq!(hand.acting_seat(), None);
         assert_eq!(hand.pot(), 0);
+        assert_eq!(hand.current_bet(), 0);
         assert!(hand.board().is_empty());
     }
 
     #[test]
-    fn record_contribution_adds_to_player_contribution_and_pot() {
+    fn record_contribution_adds_to_total_round_current_bet_and_pot() {
         let mut hand = HandState::new(positions());
 
         hand.record_contribution(SeatIndex(1), 5);
@@ -274,7 +308,37 @@ mod tests {
         assert_eq!(hand.contribution_for(SeatIndex(1)), 20);
         assert_eq!(hand.contribution_for(SeatIndex(2)), 10);
         assert_eq!(hand.contribution_for(SeatIndex(3)), 0);
+        assert_eq!(hand.round_contribution_for(SeatIndex(1)), 20);
+        assert_eq!(hand.round_contribution_for(SeatIndex(2)), 10);
+        assert_eq!(hand.current_bet(), 20);
         assert_eq!(hand.pot(), 30);
+    }
+
+    #[test]
+    fn amount_to_call_is_current_bet_minus_round_contribution() {
+        let mut hand = HandState::new(positions());
+
+        hand.record_contribution(SeatIndex(1), 5);
+        hand.record_contribution(SeatIndex(2), 10);
+
+        assert_eq!(hand.amount_to_call(SeatIndex(1)), 5);
+        assert_eq!(hand.amount_to_call(SeatIndex(2)), 0);
+        assert_eq!(hand.amount_to_call(SeatIndex(3)), 10);
+    }
+
+    #[test]
+    fn entering_new_board_betting_round_resets_round_bet_but_not_pot() {
+        let mut hand = HandState::new(positions());
+        hand.record_contribution(SeatIndex(1), 5);
+        hand.record_contribution(SeatIndex(2), 10);
+        advance_to(&mut hand, GamePhase::Flop);
+
+        assert_eq!(hand.contribution_for(SeatIndex(1)), 5);
+        assert_eq!(hand.contribution_for(SeatIndex(2)), 10);
+        assert_eq!(hand.round_contribution_for(SeatIndex(1)), 0);
+        assert_eq!(hand.round_contribution_for(SeatIndex(2)), 0);
+        assert_eq!(hand.current_bet(), 0);
+        assert_eq!(hand.pot(), 15);
     }
 
     #[test]

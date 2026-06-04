@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::{
-    Card, Deck, GamePhase, HandState, HandStateError, PlayerAction, PlayerError, SeatIndex, Table,
-    TableConfig, TableError,
+    Card, ChipAmount, Deck, GamePhase, HandState, HandStateError, PlayerAction, PlayerError,
+    SeatIndex, Table, TableConfig, TableError,
 };
 
 #[derive(Debug, Clone)]
@@ -202,12 +202,40 @@ impl GameEngine {
                 self.advance_action_to_next_playing_seat_after(seat)?;
             }
             PlayerAction::Check => {
+                let amount_to_call = self
+                    .current_hand
+                    .as_ref()
+                    .expect("turn validation guarantees an active hand")
+                    .amount_to_call(seat);
+
+                if amount_to_call > 0 {
+                    return Err(GameEngineError::CannotCheckFacingBet { amount_to_call });
+                }
+
                 self.advance_action_to_next_playing_seat_after(seat)?;
             }
-            PlayerAction::Call
-            | PlayerAction::Bet { .. }
-            | PlayerAction::Raise { .. }
-            | PlayerAction::AllIn => {
+            PlayerAction::Call => {
+                let amount_to_call = self
+                    .current_hand
+                    .as_ref()
+                    .expect("turn validation guarantees an active hand")
+                    .amount_to_call(seat);
+
+                if amount_to_call == 0 {
+                    return Err(GameEngineError::CannotCallWithoutBet);
+                }
+
+                let committed = self
+                    .table
+                    .player_at_mut(seat)
+                    .ok_or(TableError::SeatEmpty { seat })?
+                    .debit_chips(amount_to_call)?;
+
+                self.current_hand_mut()?
+                    .record_contribution(seat, committed);
+                self.advance_action_to_next_playing_seat_after(seat)?;
+            }
+            PlayerAction::Bet { .. } | PlayerAction::Raise { .. } | PlayerAction::AllIn => {
                 return Err(GameEngineError::UnsupportedPlayerAction { action });
             }
         }
@@ -309,6 +337,10 @@ pub enum GameEngineError {
         expected: SeatIndex,
         actual: SeatIndex,
     },
+    CannotCheckFacingBet {
+        amount_to_call: ChipAmount,
+    },
+    CannotCallWithoutBet,
     UnsupportedPlayerAction {
         action: PlayerAction,
     },
@@ -348,6 +380,10 @@ impl fmt::Display for GameEngineError {
                     actual.0, expected.0
                 )
             }
+            Self::CannotCheckFacingBet { amount_to_call } => {
+                write!(f, "cannot check while facing bet of {amount_to_call}")
+            }
+            Self::CannotCallWithoutBet => write!(f, "cannot call when there is no bet to call"),
             Self::UnsupportedPlayerAction { action } => {
                 write!(f, "player action {action:?} is not supported yet")
             }
@@ -594,6 +630,9 @@ mod tests {
         let hand = engine.current_hand().expect("hand should be active");
         assert_eq!(hand.contribution_for(SeatIndex(0)), 5);
         assert_eq!(hand.contribution_for(SeatIndex(3)), 10);
+        assert_eq!(hand.round_contribution_for(SeatIndex(0)), 5);
+        assert_eq!(hand.round_contribution_for(SeatIndex(3)), 10);
+        assert_eq!(hand.current_bet(), 10);
         assert_eq!(hand.pot(), 15);
 
         assert_eq!(
@@ -837,10 +876,77 @@ mod tests {
         advance_to(&mut engine, GamePhase::PreFlop);
 
         assert_eq!(
-            engine.apply_player_action(SeatIndex(0), PlayerAction::Call),
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Bet { amount: 20 }),
             Err(GameEngineError::UnsupportedPlayerAction {
-                action: PlayerAction::Call,
+                action: PlayerAction::Bet { amount: 20 },
             })
+        );
+    }
+
+    #[test]
+    fn check_fails_when_player_is_facing_a_bet() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Check),
+            Err(GameEngineError::CannotCheckFacingBet { amount_to_call: 5 })
+        );
+    }
+
+    #[test]
+    fn call_matches_current_bet_and_advances_action() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Call)
+            .expect("small blind should be able to call big blind");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.contribution_for(SeatIndex(0)), 10);
+        assert_eq!(hand.round_contribution_for(SeatIndex(0)), 10);
+        assert_eq!(hand.current_bet(), 10);
+        assert_eq!(hand.pot(), 20);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("player should be seated")
+                .stack(),
+            990
+        );
+    }
+
+    #[test]
+    fn call_fails_when_there_is_no_bet_to_call() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PreFlop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Call),
+            Err(GameEngineError::CannotCallWithoutBet)
+        );
+    }
+
+    #[test]
+    fn big_blind_can_check_after_small_blind_calls() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        advance_to(&mut engine, GamePhase::PreFlop);
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Call)
+            .expect("small blind should be able to call");
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(3), PlayerAction::Check),
+            Ok(())
         );
     }
 
