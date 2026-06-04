@@ -72,6 +72,10 @@ impl Player {
         &self.hole_cards
     }
 
+    pub fn can_play_hand(&self) -> bool {
+        self.status == PlayerStatus::Active && self.stack > 0
+    }
+
     pub fn receive_card(&mut self, card: Card) -> Result<(), PlayerError> {
         if self.hole_cards.len() >= Self::MAX_HOLE_CARDS {
             return Err(PlayerError::TooManyHoleCards);
@@ -283,5 +287,30 @@ mod tests {
         player.clear_hole_cards();
 
         assert!(player.hole_cards().is_empty());
+    }
+
+    #[test]
+    fn active_player_with_chips_can_play_hand() {
+        let player = player();
+
+        assert!(player.can_play_hand());
+    }
+
+    #[test]
+    fn folded_player_cannot_play_hand() {
+        let mut player = player();
+
+        player.fold();
+
+        assert!(!player.can_play_hand());
+    }
+
+    #[test]
+    fn all_in_player_with_no_chips_cannot_start_new_hand() {
+        let mut player = player();
+
+        player.move_all_in();
+
+        assert!(!player.can_play_hand());
     }
 }

@@ -136,6 +136,29 @@ impl Table {
         self.seats.iter().filter(|seat| seat.is_some()).count()
     }
 
+    pub fn occupied_seats(&self) -> Vec<SeatIndex> {
+        self.seats
+            .iter()
+            .enumerate()
+            .filter_map(|(index, seat)| seat.as_ref().map(|_| SeatIndex(index as u8)))
+            .collect()
+    }
+
+    pub fn playing_seats(&self) -> Vec<SeatIndex> {
+        self.seats
+            .iter()
+            .enumerate()
+            .filter_map(|(index, seat)| match seat {
+                Some(player) if player.can_play_hand() => Some(SeatIndex(index as u8)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn can_start_hand(&self) -> bool {
+        self.playing_seats().len() >= 2
+    }
+
     pub fn available_seats(&self) -> Vec<SeatIndex> {
         self.seats
             .iter()
@@ -184,6 +207,47 @@ impl Table {
     pub fn player_at_mut(&mut self, seat: SeatIndex) -> Option<&mut Player> {
         let seat_index = self.seat_offset(seat).ok()?;
         self.seats[seat_index].as_mut()
+    }
+
+    pub fn next_occupied_seat_after(
+        &self,
+        seat: SeatIndex,
+    ) -> Result<Option<SeatIndex>, TableError> {
+        self.next_seat_after(seat, |_| true)
+    }
+
+    pub fn next_playing_seat_after(
+        &self,
+        seat: SeatIndex,
+    ) -> Result<Option<SeatIndex>, TableError> {
+        self.next_seat_after(seat, Player::can_play_hand)
+    }
+
+    fn next_seat_after<F>(
+        &self,
+        seat: SeatIndex,
+        mut is_candidate: F,
+    ) -> Result<Option<SeatIndex>, TableError>
+    where
+        F: FnMut(&Player) -> bool,
+    {
+        let start_index = self.seat_offset(seat)?;
+
+        if self.seats.len() <= 1 {
+            return Ok(None);
+        }
+
+        for step in 1..self.seats.len() {
+            let index = (start_index + step) % self.seats.len();
+
+            if let Some(player) = self.seats[index].as_ref() {
+                if is_candidate(player) {
+                    return Ok(Some(SeatIndex(index as u8)));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     fn seat_offset(&self, seat: SeatIndex) -> Result<usize, TableError> {
@@ -341,6 +405,103 @@ mod tests {
         assert_eq!(player.display_name(), "Ada");
         assert_eq!(player.seat(), SeatIndex(2));
         assert_eq!(player.stack(), 1_000);
+    }
+
+    #[test]
+    fn occupied_seats_returns_only_seats_with_players() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(3), 1_000)
+            .expect("player should be seated");
+
+        assert_eq!(table.occupied_seats(), vec![SeatIndex(0), SeatIndex(3)]);
+    }
+
+    #[test]
+    fn playing_seats_excludes_players_who_cannot_start_hand() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(3), 1_000)
+            .expect("player should be seated");
+
+        table
+            .player_at_mut(SeatIndex(3))
+            .expect("player should be seated")
+            .sit_out();
+
+        assert_eq!(table.playing_seats(), vec![SeatIndex(0)]);
+    }
+
+    #[test]
+    fn hand_can_start_with_at_least_two_playing_seats() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+
+        assert!(!table.can_start_hand());
+
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(3), 1_000)
+            .expect("player should be seated");
+
+        assert!(table.can_start_hand());
+    }
+
+    #[test]
+    fn next_occupied_seat_after_wraps_around_table() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(1), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(4), 1_000)
+            .expect("player should be seated");
+
+        assert_eq!(
+            table.next_occupied_seat_after(SeatIndex(4)),
+            Ok(Some(SeatIndex(1)))
+        );
+    }
+
+    #[test]
+    fn next_playing_seat_after_skips_sitting_out_players() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(2), "Grace", SeatIndex(2), 1_000)
+            .expect("player should be seated");
+        table
+            .sit_player(PlayerId(3), "Linus", SeatIndex(4), 1_000)
+            .expect("player should be seated");
+
+        table
+            .player_at_mut(SeatIndex(2))
+            .expect("player should be seated")
+            .sit_out();
+
+        assert_eq!(
+            table.next_playing_seat_after(SeatIndex(0)),
+            Ok(Some(SeatIndex(4)))
+        );
+    }
+
+    #[test]
+    fn next_playing_seat_after_returns_none_when_there_is_no_other_playing_seat() {
+        let mut table = table();
+        table
+            .sit_player(PlayerId(1), "Ada", SeatIndex(0), 1_000)
+            .expect("player should be seated");
+
+        assert_eq!(table.next_playing_seat_after(SeatIndex(0)), Ok(None));
     }
 
     #[test]
