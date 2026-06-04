@@ -1,11 +1,15 @@
 use std::fmt;
 
-use crate::{GamePhase, HandState, HandStateError, SeatIndex, Table, TableConfig, TableError};
+use crate::{
+    Deck, GamePhase, HandState, HandStateError, PlayerError, SeatIndex, Table, TableConfig,
+    TableError,
+};
 
 #[derive(Debug, Clone)]
 pub struct GameEngine {
     table: Table,
     current_hand: Option<HandState>,
+    deck: Option<Deck>,
 }
 
 impl GameEngine {
@@ -13,6 +17,7 @@ impl GameEngine {
         Self {
             table: Table::new(config),
             current_hand: None,
+            deck: None,
         }
     }
 
@@ -28,6 +33,10 @@ impl GameEngine {
         self.current_hand.as_ref()
     }
 
+    pub fn deck(&self) -> Option<&Deck> {
+        self.deck.as_ref()
+    }
+
     pub fn start_hand(&mut self, dealer_seat: SeatIndex) -> Result<&HandState, GameEngineError> {
         if self.current_hand.is_some() {
             return Err(GameEngineError::HandAlreadyInProgress);
@@ -38,6 +47,27 @@ impl GameEngine {
             .hand_positions(dealer_seat)?
             .ok_or(GameEngineError::NotEnoughPlayersToStartHand)?;
 
+        let playing_seats = self.table.playing_seats();
+        let mut deck = Deck::new_shuffled();
+
+        for seat in &playing_seats {
+            self.table
+                .player_at_mut(*seat)
+                .expect("playing_seats only returns occupied seats")
+                .clear_hole_cards();
+        }
+
+        for _ in 0..2 {
+            for seat in &playing_seats {
+                let card = deck.deal_one().ok_or(GameEngineError::DeckExhausted)?;
+                self.table
+                    .player_at_mut(*seat)
+                    .expect("playing_seats only returns occupied seats")
+                    .receive_card(card)?;
+            }
+        }
+
+        self.deck = Some(deck);
         self.current_hand = Some(HandState::new(positions));
 
         Ok(self
@@ -61,7 +91,9 @@ pub enum GameEngineError {
     NoActiveHand,
     HandAlreadyInProgress,
     NotEnoughPlayersToStartHand,
+    DeckExhausted,
     Table(TableError),
+    Player(PlayerError),
     HandState(HandStateError),
 }
 
@@ -71,7 +103,9 @@ impl fmt::Display for GameEngineError {
             Self::NoActiveHand => write!(f, "no active hand"),
             Self::HandAlreadyInProgress => write!(f, "a hand is already in progress"),
             Self::NotEnoughPlayersToStartHand => write!(f, "not enough players to start hand"),
+            Self::DeckExhausted => write!(f, "deck does not have enough cards"),
             Self::Table(error) => write!(f, "{error}"),
+            Self::Player(error) => write!(f, "{error}"),
             Self::HandState(error) => write!(f, "{error}"),
         }
     }
@@ -85,9 +119,15 @@ impl From<TableError> for GameEngineError {
     }
 }
 
+impl From<PlayerError> for GameEngineError {
+    fn from(error: PlayerError) -> Self {
+        Self::Player(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{PlayerId, TableConfig};
+    use crate::{Player, PlayerId, TableConfig};
 
     use super::*;
 
@@ -117,6 +157,7 @@ mod tests {
         let engine = engine();
 
         assert!(engine.current_hand().is_none());
+        assert!(engine.deck().is_none());
         assert_eq!(engine.table().seat_count(), 6);
     }
 
@@ -147,6 +188,60 @@ mod tests {
         assert_eq!(hand.small_blind_seat(), SeatIndex(0));
         assert_eq!(hand.big_blind_seat(), SeatIndex(3));
         assert_eq!(hand.first_to_act_seat(), SeatIndex(0));
+    }
+
+    #[test]
+    fn start_hand_creates_live_deck_and_deals_two_hole_cards_to_each_playing_player() {
+        let mut engine = engine_with_two_players();
+
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+
+        let ada = engine
+            .table()
+            .player_at(SeatIndex(0))
+            .expect("player should be seated");
+        let grace = engine
+            .table()
+            .player_at(SeatIndex(3))
+            .expect("player should be seated");
+
+        assert_eq!(ada.hole_cards().len(), 2);
+        assert_eq!(grace.hole_cards().len(), 2);
+        assert_eq!(
+            engine.deck().map(Deck::len),
+            Some(Deck::CARD_COUNT - Player::MAX_HOLE_CARDS * 2)
+        );
+    }
+
+    #[test]
+    fn start_hand_does_not_deal_to_sitting_out_players() {
+        let mut engine = engine_with_two_players();
+        engine
+            .table_mut()
+            .sit_player(PlayerId(3), "Linus", SeatIndex(5), 1_000)
+            .expect("third player should sit");
+        engine
+            .table_mut()
+            .player_at_mut(SeatIndex(5))
+            .expect("third player should be seated")
+            .sit_out();
+
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two playing players");
+
+        let sitting_out_player = engine
+            .table()
+            .player_at(SeatIndex(5))
+            .expect("third player should remain seated");
+
+        assert!(sitting_out_player.hole_cards().is_empty());
+        assert_eq!(
+            engine.deck().map(Deck::len),
+            Some(Deck::CARD_COUNT - Player::MAX_HOLE_CARDS * 2)
+        );
     }
 
     #[test]
