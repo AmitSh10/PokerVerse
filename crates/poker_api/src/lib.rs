@@ -6,10 +6,13 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use poker_engine::TableConfig;
 use poker_server::{RoomCommand, RoomCommandResult, RoomId, RoomManager, RoomManagerError};
@@ -39,6 +42,7 @@ pub fn app(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/rooms", post(create_room))
         .route("/rooms/{room_id}/commands", post(handle_room_command))
+        .route("/rooms/{room_id}/ws", any(room_websocket))
         .with_state(state)
 }
 
@@ -90,13 +94,84 @@ async fn handle_room_command(
     State(state): State<ApiState>,
     Json(command): Json<RoomCommand>,
 ) -> Result<Json<RoomCommandResult>, ApiError> {
+    let result = dispatch_room_command(&state, RoomId(room_id), command)?;
+
+    Ok(Json(result))
+}
+
+async fn room_websocket(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    websocket
+        .on_upgrade(move |socket| handle_room_socket(socket, state, RoomId(room_id)))
+        .into_response()
+}
+
+async fn handle_room_socket(mut socket: WebSocket, state: ApiState, room_id: RoomId) {
+    while let Some(message) = socket.recv().await {
+        let response = match message {
+            Ok(Message::Text(text)) => handle_room_socket_text(&state, room_id, text.as_ref()),
+            Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+            Ok(Message::Binary(_)) => WebSocketServerMessage::Error(ApiErrorBody {
+                error: "expected text JSON room command".to_string(),
+            }),
+            Err(error) => WebSocketServerMessage::Error(ApiErrorBody {
+                error: format!("websocket receive error: {error}"),
+            }),
+        };
+
+        let Ok(payload) = serde_json::to_string(&response) else {
+            break;
+        };
+
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn handle_room_socket_text(
+    state: &ApiState,
+    room_id: RoomId,
+    text: &str,
+) -> WebSocketServerMessage {
+    let command = match serde_json::from_str::<RoomCommand>(text) {
+        Ok(command) => command,
+        Err(error) => {
+            return WebSocketServerMessage::Error(ApiErrorBody {
+                error: format!("invalid room command JSON: {error}"),
+            });
+        }
+    };
+
+    match dispatch_room_command(state, room_id, command) {
+        Ok(result) => WebSocketServerMessage::CommandResult(result),
+        Err(error) => WebSocketServerMessage::Error(ApiErrorBody {
+            error: error.to_string(),
+        }),
+    }
+}
+
+fn dispatch_room_command(
+    state: &ApiState,
+    room_id: RoomId,
+    command: RoomCommand,
+) -> Result<RoomCommandResult, ApiError> {
     let rooms = state
         .rooms
         .read()
         .map_err(|_| ApiError::StateLockPoisoned)?;
-    let result = rooms.handle_room_command(RoomId(room_id), command)?;
 
-    Ok(Json(result))
+    Ok(rooms.handle_room_command(room_id, command)?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WebSocketServerMessage {
+    CommandResult(RoomCommandResult),
+    Error(ApiErrorBody),
 }
 
 #[derive(Debug)]
@@ -277,5 +352,41 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json::<ApiErrorBody>(response).await;
         assert!(body.error.contains("404"));
+    }
+
+    #[test]
+    fn websocket_text_handler_returns_command_result_message() {
+        let mut manager = RoomManager::new();
+        manager
+            .create_room(RoomId(7), table_config())
+            .expect("room should be created");
+        let state = ApiState::new(manager);
+        let command = RoomCommand::SitPlayer {
+            id: PlayerId(1),
+            display_name: "Ada".to_string(),
+            seat: SeatIndex(0),
+            buy_in: 1_000,
+        };
+        let text = serde_json::to_string(&command).expect("command should serialize");
+
+        let message = handle_room_socket_text(&state, RoomId(7), &text);
+
+        let WebSocketServerMessage::CommandResult(result) = message else {
+            panic!("expected command result websocket message");
+        };
+        assert!(result.events().is_empty());
+        assert_eq!(result.snapshot().players().len(), 1);
+    }
+
+    #[test]
+    fn websocket_text_handler_returns_error_for_invalid_json() {
+        let state = ApiState::default();
+
+        let message = handle_room_socket_text(&state, RoomId(7), "not json");
+
+        let WebSocketServerMessage::Error(error) = message else {
+            panic!("expected error websocket message");
+        };
+        assert!(error.error.contains("invalid room command JSON"));
     }
 }
