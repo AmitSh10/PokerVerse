@@ -1,10 +1,10 @@
 use std::fmt;
 
 use crate::{
-    Card, ChipAmount, ContributionSnapshot, Deck, EvaluatedHand, GamePhase, GameSnapshot,
-    HandEvaluationError, HandSnapshot, HandState, HandStateError, Player, PlayerAction,
-    PlayerError, PlayerId, PlayerSnapshot, PlayerStatus, PotContribution, SeatIndex, Table,
-    TableConfig, TableError, calculate_side_pots, evaluate_best_hand,
+    Card, ChipAmount, ContributionSnapshot, Deck, EvaluatedHand, GameEvent, GamePhase,
+    GameSnapshot, HandEvaluationError, HandSnapshot, HandState, HandStateError, PayoutEvent,
+    Player, PlayerAction, PlayerError, PlayerId, PlayerSnapshot, PlayerStatus, PotContribution,
+    SeatIndex, Table, TableConfig, TableError, calculate_side_pots, evaluate_best_hand,
 };
 
 #[derive(Debug, Clone)]
@@ -12,6 +12,7 @@ pub struct GameEngine {
     table: Table,
     current_hand: Option<HandState>,
     deck: Option<Deck>,
+    events: Vec<GameEvent>,
 }
 
 impl GameEngine {
@@ -20,6 +21,7 @@ impl GameEngine {
             table: Table::new(config),
             current_hand: None,
             deck: None,
+            events: Vec::new(),
         }
     }
 
@@ -37,6 +39,14 @@ impl GameEngine {
 
     pub fn deck(&self) -> Option<&Deck> {
         self.deck.as_ref()
+    }
+
+    pub fn events(&self) -> &[GameEvent] {
+        &self.events
+    }
+
+    pub fn drain_events(&mut self) -> Vec<GameEvent> {
+        self.events.drain(..).collect()
     }
 
     pub fn public_snapshot(&self) -> GameSnapshot {
@@ -83,6 +93,14 @@ impl GameEngine {
 
         self.deck = Some(deck);
         self.current_hand = Some(HandState::new(positions));
+        self.events.push(GameEvent::HandStarted {
+            dealer_seat,
+            playing_seats: playing_seats.clone(),
+        });
+        self.events.push(GameEvent::HoleCardsDealt {
+            seats: playing_seats,
+            cards_per_player: Player::MAX_HOLE_CARDS,
+        });
 
         Ok(self
             .current_hand
@@ -91,12 +109,17 @@ impl GameEngine {
     }
 
     pub fn advance_hand_phase(&mut self) -> Result<GamePhase, GameEngineError> {
-        let hand = self
-            .current_hand
-            .as_mut()
-            .ok_or(GameEngineError::NoActiveHand)?;
+        let phase = {
+            let hand = self
+                .current_hand
+                .as_mut()
+                .ok_or(GameEngineError::NoActiveHand)?;
 
-        hand.advance_phase().map_err(GameEngineError::HandState)
+            hand.advance_phase().map_err(GameEngineError::HandState)?
+        };
+        self.events.push(GameEvent::PhaseAdvanced { phase });
+
+        Ok(phase)
     }
 
     pub fn post_blinds(&mut self) -> Result<(), GameEngineError> {
@@ -143,6 +166,12 @@ impl GameEngine {
 
         hand.record_contribution(small_blind_seat, small_blind_committed);
         hand.record_contribution(big_blind_seat, big_blind_committed);
+        self.events.push(GameEvent::BlindsPosted {
+            small_blind_seat,
+            small_blind: small_blind_committed,
+            big_blind_seat,
+            big_blind: big_blind_committed,
+        });
 
         Ok(())
     }
@@ -157,6 +186,10 @@ impl GameEngine {
         ];
 
         self.current_hand_mut()?.reveal_flop(cards)?;
+        self.events.push(GameEvent::BoardRevealed {
+            phase: GamePhase::Flop,
+            cards: cards.to_vec(),
+        });
         Ok(())
     }
 
@@ -165,6 +198,10 @@ impl GameEngine {
         let card = self.deal_one_from_deck()?;
 
         self.current_hand_mut()?.reveal_turn(card)?;
+        self.events.push(GameEvent::BoardRevealed {
+            phase: GamePhase::Turn,
+            cards: vec![card],
+        });
         Ok(())
     }
 
@@ -173,6 +210,10 @@ impl GameEngine {
         let card = self.deal_one_from_deck()?;
 
         self.current_hand_mut()?.reveal_river(card)?;
+        self.events.push(GameEvent::BoardRevealed {
+            phase: GamePhase::River,
+            cards: vec![card],
+        });
         Ok(())
     }
 
@@ -196,6 +237,7 @@ impl GameEngine {
                 player.clear_hole_cards();
             }
         }
+        self.events.push(GameEvent::HandFinished);
 
         Ok(hand)
     }
@@ -316,6 +358,13 @@ impl GameEngine {
         }
 
         self.advance_hand_phase()?;
+        self.events.push(GameEvent::PotAwarded {
+            total_pot,
+            payouts: payouts
+                .iter()
+                .map(|payout| PayoutEvent::new(payout.seat(), payout.amount()))
+                .collect(),
+        });
 
         Ok(PayoutResult { total_pot, payouts })
     }
@@ -542,6 +591,8 @@ impl GameEngine {
                 self.complete_round_or_advance_action_after(seat)?;
             }
         }
+
+        self.events.push(GameEvent::PlayerActed { seat, action });
 
         Ok(())
     }
@@ -1047,6 +1098,7 @@ mod tests {
         assert!(engine.current_hand().is_none());
         assert!(engine.deck().is_none());
         assert_eq!(engine.table().seat_count(), 6);
+        assert!(engine.events().is_empty());
     }
 
     #[test]
@@ -1101,6 +1153,32 @@ mod tests {
             engine.deck().map(Deck::len),
             Some(Deck::CARD_COUNT - Player::MAX_HOLE_CARDS * 2)
         );
+        assert_eq!(
+            engine.events(),
+            &[
+                GameEvent::HandStarted {
+                    dealer_seat: SeatIndex(0),
+                    playing_seats: vec![SeatIndex(0), SeatIndex(3)],
+                },
+                GameEvent::HoleCardsDealt {
+                    seats: vec![SeatIndex(0), SeatIndex(3)],
+                    cards_per_player: Player::MAX_HOLE_CARDS,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn drain_events_returns_and_clears_accumulated_events() {
+        let mut engine = engine_with_two_players();
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+
+        let events = engine.drain_events();
+
+        assert_eq!(events.len(), 2);
+        assert!(engine.events().is_empty());
     }
 
     #[test]
@@ -1258,6 +1336,7 @@ mod tests {
         engine
             .advance_hand_phase()
             .expect("hand should enter posting blinds");
+        engine.drain_events();
 
         engine.post_blinds().expect("blinds should post");
 
@@ -1284,6 +1363,15 @@ mod tests {
                 .expect("big blind should be seated")
                 .stack(),
             990
+        );
+        assert_eq!(
+            engine.events(),
+            &[GameEvent::BlindsPosted {
+                small_blind_seat: SeatIndex(0),
+                small_blind: 5,
+                big_blind_seat: SeatIndex(3),
+                big_blind: 10,
+            }]
         );
     }
 
@@ -1343,6 +1431,7 @@ mod tests {
         let mut engine = engine_with_started_hand();
         advance_to(&mut engine, GamePhase::Flop);
         let deck_len_before = engine.deck().map(Deck::len).expect("deck should exist");
+        engine.drain_events();
 
         engine.deal_flop().expect("flop should deal");
 
@@ -1355,6 +1444,13 @@ mod tests {
             3
         );
         assert_eq!(engine.deck().map(Deck::len), Some(deck_len_before - 3));
+        assert!(matches!(
+            engine.events(),
+            [GameEvent::BoardRevealed {
+                phase: GamePhase::Flop,
+                cards,
+            }] if cards.len() == 3
+        ));
     }
 
     #[test]
@@ -1404,6 +1500,7 @@ mod tests {
     fn finish_hand_clears_active_hand_deck_and_hole_cards() {
         let mut engine = engine_with_started_hand();
         advance_to(&mut engine, GamePhase::HandComplete);
+        engine.drain_events();
 
         let finished_hand = engine.finish_hand().expect("hand should finish");
 
@@ -1426,6 +1523,7 @@ mod tests {
                 .hole_cards()
                 .is_empty()
         );
+        assert_eq!(engine.events(), &[GameEvent::HandFinished]);
     }
 
     #[test]
@@ -1557,6 +1655,7 @@ mod tests {
             card(Rank::Jack, Suit::Diamonds),
             card(Rank::Two, Suit::Spades),
         );
+        engine.drain_events();
 
         let payout = engine
             .award_showdown_pot()
@@ -1586,6 +1685,18 @@ mod tests {
         let hand = engine.current_hand().expect("hand should remain active");
         assert_eq!(hand.pot(), 0);
         assert_eq!(hand.phase(), GamePhase::HandComplete);
+        assert_eq!(
+            engine.events(),
+            &[
+                GameEvent::PhaseAdvanced {
+                    phase: GamePhase::HandComplete,
+                },
+                GameEvent::PotAwarded {
+                    total_pot: 20,
+                    payouts: vec![PayoutEvent::new(SeatIndex(0), 20)],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1798,6 +1909,7 @@ mod tests {
     fn check_advances_action_to_next_playing_seat() {
         let mut engine = engine_with_three_players_started_hand();
         advance_to(&mut engine, GamePhase::PreFlop);
+        engine.drain_events();
 
         engine
             .apply_player_action(SeatIndex(0), PlayerAction::Check)
@@ -1806,6 +1918,13 @@ mod tests {
         assert_eq!(
             engine.current_hand().and_then(HandState::acting_seat),
             Some(SeatIndex(3))
+        );
+        assert_eq!(
+            engine.events(),
+            &[GameEvent::PlayerActed {
+                seat: SeatIndex(0),
+                action: PlayerAction::Check,
+            }]
         );
     }
 

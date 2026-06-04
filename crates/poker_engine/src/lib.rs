@@ -2,6 +2,7 @@ pub mod action;
 pub mod card;
 pub mod deck;
 pub mod engine;
+pub mod event;
 pub mod hand_eval;
 pub mod player;
 pub mod pot;
@@ -15,6 +16,7 @@ pub use deck::Deck;
 pub use engine::{
     GameEngine, GameEngineError, PayoutResult, PlayerPayout, PlayerShowdownHand, ShowdownResult,
 };
+pub use event::{GameEvent, PayoutEvent};
 pub use hand_eval::{
     EvaluatedHand, HandCategory, HandEvaluationError, HandRank, evaluate_best_hand,
 };
