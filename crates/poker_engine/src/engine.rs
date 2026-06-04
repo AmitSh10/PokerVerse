@@ -235,7 +235,37 @@ impl GameEngine {
                     .record_contribution(seat, committed);
                 self.advance_action_to_next_playing_seat_after(seat)?;
             }
-            PlayerAction::Bet { .. } | PlayerAction::Raise { .. } | PlayerAction::AllIn => {
+            PlayerAction::Bet { amount } => {
+                let current_bet = self
+                    .current_hand
+                    .as_ref()
+                    .expect("turn validation guarantees an active hand")
+                    .current_bet();
+
+                if current_bet > 0 {
+                    return Err(GameEngineError::CannotBetFacingBet { current_bet });
+                }
+
+                let minimum_bet = self.table.config().big_blind();
+
+                if amount < minimum_bet {
+                    return Err(GameEngineError::BetTooSmall {
+                        amount,
+                        minimum: minimum_bet,
+                    });
+                }
+
+                let committed = self
+                    .table
+                    .player_at_mut(seat)
+                    .ok_or(TableError::SeatEmpty { seat })?
+                    .debit_chips(amount)?;
+
+                self.current_hand_mut()?
+                    .record_contribution(seat, committed);
+                self.advance_action_to_next_playing_seat_after(seat)?;
+            }
+            PlayerAction::Raise { .. } | PlayerAction::AllIn => {
                 return Err(GameEngineError::UnsupportedPlayerAction { action });
             }
         }
@@ -341,6 +371,13 @@ pub enum GameEngineError {
         amount_to_call: ChipAmount,
     },
     CannotCallWithoutBet,
+    CannotBetFacingBet {
+        current_bet: ChipAmount,
+    },
+    BetTooSmall {
+        amount: ChipAmount,
+        minimum: ChipAmount,
+    },
     UnsupportedPlayerAction {
         action: PlayerAction,
     },
@@ -384,6 +421,12 @@ impl fmt::Display for GameEngineError {
                 write!(f, "cannot check while facing bet of {amount_to_call}")
             }
             Self::CannotCallWithoutBet => write!(f, "cannot call when there is no bet to call"),
+            Self::CannotBetFacingBet { current_bet } => {
+                write!(f, "cannot bet while current bet is {current_bet}")
+            }
+            Self::BetTooSmall { amount, minimum } => {
+                write!(f, "bet {amount} is below minimum {minimum}")
+            }
             Self::UnsupportedPlayerAction { action } => {
                 write!(f, "player action {action:?} is not supported yet")
             }
@@ -876,9 +919,9 @@ mod tests {
         advance_to(&mut engine, GamePhase::PreFlop);
 
         assert_eq!(
-            engine.apply_player_action(SeatIndex(0), PlayerAction::Bet { amount: 20 }),
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Raise { amount: 20 }),
             Err(GameEngineError::UnsupportedPlayerAction {
-                action: PlayerAction::Bet { amount: 20 },
+                action: PlayerAction::Raise { amount: 20 },
             })
         );
     }
@@ -947,6 +990,73 @@ mod tests {
         assert_eq!(
             engine.apply_player_action(SeatIndex(3), PlayerAction::Check),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn bet_starts_new_betting_round_and_advances_action() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Bet { amount: 25 })
+            .expect("acting player should be able to bet when no bet exists");
+
+        let hand = engine.current_hand().expect("hand should be active");
+        assert_eq!(hand.contribution_for(SeatIndex(0)), 25);
+        assert_eq!(hand.round_contribution_for(SeatIndex(0)), 25);
+        assert_eq!(hand.current_bet(), 25);
+        assert_eq!(hand.pot(), 25);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("player should be seated")
+                .stack(),
+            975
+        );
+    }
+
+    #[test]
+    fn bet_fails_when_current_bet_already_exists() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+        engine
+            .apply_player_action(SeatIndex(0), PlayerAction::Bet { amount: 25 })
+            .expect("first bet should succeed");
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(3), PlayerAction::Bet { amount: 50 }),
+            Err(GameEngineError::CannotBetFacingBet { current_bet: 25 })
+        );
+    }
+
+    #[test]
+    fn bet_must_meet_minimum_bet() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Bet { amount: 9 }),
+            Err(GameEngineError::BetTooSmall {
+                amount: 9,
+                minimum: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn bet_fails_when_amount_exceeds_stack() {
+        let mut engine = engine_with_three_players_started_hand();
+        advance_to(&mut engine, GamePhase::Flop);
+
+        assert_eq!(
+            engine.apply_player_action(SeatIndex(0), PlayerAction::Bet { amount: 1_001 }),
+            Err(GameEngineError::Player(PlayerError::NotEnoughChips {
+                requested: 1_001,
+                available: 1_000,
+            }))
         );
     }
 
