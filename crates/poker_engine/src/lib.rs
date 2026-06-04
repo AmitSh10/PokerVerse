@@ -10,7 +10,7 @@ pub mod table;
 pub use action::PlayerAction;
 pub use card::{Card, Rank, Suit};
 pub use deck::Deck;
-pub use engine::{GameEngine, GameEngineError};
+pub use engine::{GameEngine, GameEngineError, PlayerShowdownHand, ShowdownResult};
 pub use hand_eval::{
     EvaluatedHand, HandCategory, HandEvaluationError, HandRank, evaluate_best_hand,
 };

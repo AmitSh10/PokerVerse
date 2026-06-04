@@ -1,8 +1,9 @@
 use std::fmt;
 
 use crate::{
-    Card, ChipAmount, Deck, GamePhase, HandState, HandStateError, PlayerAction, PlayerError,
-    PlayerStatus, SeatIndex, Table, TableConfig, TableError,
+    Card, ChipAmount, Deck, EvaluatedHand, GamePhase, HandEvaluationError, HandState,
+    HandStateError, Player, PlayerAction, PlayerError, PlayerId, PlayerStatus, SeatIndex, Table,
+    TableConfig, TableError, evaluate_best_hand,
 };
 
 #[derive(Debug, Clone)]
@@ -184,6 +185,61 @@ impl GameEngine {
         }
 
         Ok(hand)
+    }
+
+    pub fn showdown(&self) -> Result<ShowdownResult, GameEngineError> {
+        let hand = self
+            .current_hand
+            .as_ref()
+            .ok_or(GameEngineError::NoActiveHand)?;
+
+        if hand.phase() != GamePhase::Showdown {
+            return Err(GameEngineError::InvalidPhaseForShowdown {
+                actual: hand.phase(),
+            });
+        }
+
+        let mut player_hands = Vec::new();
+
+        for seat in self.contesting_seats() {
+            let player = self
+                .table
+                .player_at(seat)
+                .ok_or(TableError::SeatEmpty { seat })?;
+
+            if player.hole_cards().len() != Player::MAX_HOLE_CARDS {
+                return Err(GameEngineError::PlayerMissingHoleCards {
+                    seat,
+                    card_count: player.hole_cards().len(),
+                });
+            }
+
+            let mut cards = Vec::with_capacity(Player::MAX_HOLE_CARDS + HandState::MAX_BOARD_CARDS);
+            cards.extend_from_slice(player.hole_cards());
+            cards.extend_from_slice(hand.board());
+
+            player_hands.push(PlayerShowdownHand {
+                seat,
+                player_id: player.id(),
+                hand: evaluate_best_hand(&cards)?,
+            });
+        }
+
+        let best_hand = player_hands
+            .iter()
+            .map(|player_hand| &player_hand.hand)
+            .max()
+            .ok_or(GameEngineError::NoShowdownPlayers)?;
+        let winner_seats = player_hands
+            .iter()
+            .filter(|player_hand| player_hand.hand == *best_hand)
+            .map(|player_hand| player_hand.seat)
+            .collect();
+
+        Ok(ShowdownResult {
+            winner_seats,
+            player_hands,
+        })
     }
 
     pub fn apply_player_action(
@@ -428,6 +484,10 @@ impl GameEngine {
     }
 
     fn remaining_contesting_player_count(&self) -> usize {
+        self.contesting_seats().len()
+    }
+
+    fn contesting_seats(&self) -> Vec<SeatIndex> {
         self.table
             .occupied_seats()
             .into_iter()
@@ -436,7 +496,7 @@ impl GameEngine {
                     matches!(player.status(), PlayerStatus::Active | PlayerStatus::AllIn)
                 })
             })
-            .count()
+            .collect()
     }
 
     fn first_postflop_acting_seat(&self) -> Result<Option<SeatIndex>, GameEngineError> {
@@ -482,6 +542,43 @@ impl GameEngine {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowdownResult {
+    winner_seats: Vec<SeatIndex>,
+    player_hands: Vec<PlayerShowdownHand>,
+}
+
+impl ShowdownResult {
+    pub fn winner_seats(&self) -> &[SeatIndex] {
+        &self.winner_seats
+    }
+
+    pub fn player_hands(&self) -> &[PlayerShowdownHand] {
+        &self.player_hands
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerShowdownHand {
+    seat: SeatIndex,
+    player_id: PlayerId,
+    hand: EvaluatedHand,
+}
+
+impl PlayerShowdownHand {
+    pub fn seat(&self) -> SeatIndex {
+        self.seat
+    }
+
+    pub fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub fn hand(&self) -> &EvaluatedHand {
+        &self.hand
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameEngineError {
     NoActiveHand,
@@ -498,6 +595,9 @@ pub enum GameEngineError {
         actual: GamePhase,
     },
     InvalidPhaseForFinishingHand {
+        actual: GamePhase,
+    },
+    InvalidPhaseForShowdown {
         actual: GamePhase,
     },
     InvalidPhaseForPlayerAction {
@@ -526,9 +626,15 @@ pub enum GameEngineError {
     UnsupportedPlayerAction {
         action: PlayerAction,
     },
+    PlayerMissingHoleCards {
+        seat: SeatIndex,
+        card_count: usize,
+    },
+    NoShowdownPlayers,
     Table(TableError),
     Player(PlayerError),
     HandState(HandStateError),
+    HandEvaluation(HandEvaluationError),
 }
 
 impl fmt::Display for GameEngineError {
@@ -551,6 +657,9 @@ impl fmt::Display for GameEngineError {
             }
             Self::InvalidPhaseForFinishingHand { actual } => {
                 write!(f, "cannot finish hand in phase {actual:?}")
+            }
+            Self::InvalidPhaseForShowdown { actual } => {
+                write!(f, "cannot evaluate showdown in phase {actual:?}")
             }
             Self::InvalidPhaseForPlayerAction { actual } => {
                 write!(f, "cannot apply player action in phase {actual:?}")
@@ -579,9 +688,18 @@ impl fmt::Display for GameEngineError {
             Self::UnsupportedPlayerAction { action } => {
                 write!(f, "player action {action:?} is not supported yet")
             }
+            Self::PlayerMissingHoleCards { seat, card_count } => {
+                write!(
+                    f,
+                    "player in seat {} has {card_count} hole cards; expected 2",
+                    seat.0
+                )
+            }
+            Self::NoShowdownPlayers => write!(f, "no players available for showdown"),
             Self::Table(error) => write!(f, "{error}"),
             Self::Player(error) => write!(f, "{error}"),
             Self::HandState(error) => write!(f, "{error}"),
+            Self::HandEvaluation(error) => write!(f, "{error}"),
         }
     }
 }
@@ -606,9 +724,15 @@ impl From<HandStateError> for GameEngineError {
     }
 }
 
+impl From<HandEvaluationError> for GameEngineError {
+    fn from(error: HandEvaluationError) -> Self {
+        Self::HandEvaluation(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Player, PlayerId, TableConfig};
+    use crate::{HandCategory, Player, PlayerId, Rank, Suit, TableConfig};
 
     use super::*;
 
@@ -664,6 +788,53 @@ mod tests {
                 .advance_hand_phase()
                 .expect("phase should advance before hand is complete");
         }
+    }
+
+    fn card(rank: Rank, suit: Suit) -> Card {
+        Card::new(rank, suit)
+    }
+
+    fn force_hole_cards(engine: &mut GameEngine, seat: SeatIndex, cards: [Card; 2]) {
+        let player = engine
+            .table_mut()
+            .player_at_mut(seat)
+            .expect("player should be seated");
+
+        player.clear_hole_cards();
+        player
+            .receive_card(cards[0])
+            .expect("first hole card should be accepted");
+        player
+            .receive_card(cards[1])
+            .expect("second hole card should be accepted");
+    }
+
+    fn force_board_and_showdown(engine: &mut GameEngine, flop: [Card; 3], turn: Card, river: Card) {
+        advance_to(engine, GamePhase::Flop);
+        engine
+            .current_hand
+            .as_mut()
+            .expect("hand should be active")
+            .reveal_flop(flop)
+            .expect("flop should reveal");
+
+        advance_to(engine, GamePhase::Turn);
+        engine
+            .current_hand
+            .as_mut()
+            .expect("hand should be active")
+            .reveal_turn(turn)
+            .expect("turn should reveal");
+
+        advance_to(engine, GamePhase::River);
+        engine
+            .current_hand
+            .as_mut()
+            .expect("hand should be active")
+            .reveal_river(river)
+            .expect("river should reveal");
+
+        advance_to(engine, GamePhase::Showdown);
     }
 
     #[test]
@@ -962,6 +1133,103 @@ mod tests {
                 .expect("player should be seated")
                 .hole_cards()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn showdown_requires_showdown_phase() {
+        let engine = engine_with_started_hand();
+
+        assert_eq!(
+            engine.showdown(),
+            Err(GameEngineError::InvalidPhaseForShowdown {
+                actual: GamePhase::StartingHand,
+            })
+        );
+    }
+
+    #[test]
+    fn showdown_selects_best_remaining_player() {
+        let mut engine = engine_with_started_hand();
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(0),
+            [
+                card(Rank::Ten, Suit::Clubs),
+                card(Rank::Three, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(3),
+            [
+                card(Rank::Nine, Suit::Clubs),
+                card(Rank::Eight, Suit::Diamonds),
+            ],
+        );
+        force_board_and_showdown(
+            &mut engine,
+            [
+                card(Rank::Ace, Suit::Spades),
+                card(Rank::King, Suit::Hearts),
+                card(Rank::Queen, Suit::Clubs),
+            ],
+            card(Rank::Jack, Suit::Diamonds),
+            card(Rank::Two, Suit::Spades),
+        );
+
+        let result = engine.showdown().expect("showdown should evaluate");
+
+        assert_eq!(result.winner_seats(), &[SeatIndex(0)]);
+        assert_eq!(result.player_hands().len(), 2);
+        assert_eq!(
+            result
+                .player_hands()
+                .iter()
+                .find(|player_hand| player_hand.seat() == SeatIndex(0))
+                .expect("winner should have a hand")
+                .hand()
+                .rank()
+                .category(),
+            HandCategory::Straight
+        );
+    }
+
+    #[test]
+    fn showdown_supports_tied_winners() {
+        let mut engine = engine_with_started_hand();
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(0),
+            [
+                card(Rank::Three, Suit::Clubs),
+                card(Rank::Two, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(3),
+            [card(Rank::Four, Suit::Clubs), card(Rank::Two, Suit::Hearts)],
+        );
+        force_board_and_showdown(
+            &mut engine,
+            [
+                card(Rank::Ace, Suit::Spades),
+                card(Rank::King, Suit::Hearts),
+                card(Rank::Queen, Suit::Clubs),
+            ],
+            card(Rank::Jack, Suit::Diamonds),
+            card(Rank::Ten, Suit::Spades),
+        );
+
+        let result = engine.showdown().expect("showdown should evaluate");
+
+        assert_eq!(result.winner_seats(), &[SeatIndex(0), SeatIndex(3)]);
+        assert!(
+            result
+                .player_hands()
+                .iter()
+                .all(|player_hand| player_hand.hand().rank().category() == HandCategory::Straight)
         );
     }
 
