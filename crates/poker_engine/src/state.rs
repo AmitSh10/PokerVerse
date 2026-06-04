@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Card, SeatIndex};
+use crate::{Card, HandPositions, SeatIndex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
@@ -34,7 +34,7 @@ impl GamePhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandState {
     phase: GamePhase,
-    dealer_seat: SeatIndex,
+    positions: HandPositions,
     acting_seat: Option<SeatIndex>,
     board: Vec<Card>,
 }
@@ -43,10 +43,10 @@ impl HandState {
     pub const MAX_BOARD_CARDS: usize = 5;
     pub const FLOP_CARD_COUNT: usize = 3;
 
-    pub fn new(dealer_seat: SeatIndex) -> Self {
+    pub fn new(positions: HandPositions) -> Self {
         Self {
             phase: GamePhase::StartingHand,
-            dealer_seat,
+            positions,
             acting_seat: None,
             board: Vec::with_capacity(Self::MAX_BOARD_CARDS),
         }
@@ -57,7 +57,23 @@ impl HandState {
     }
 
     pub fn dealer_seat(&self) -> SeatIndex {
-        self.dealer_seat
+        self.positions.dealer()
+    }
+
+    pub fn small_blind_seat(&self) -> SeatIndex {
+        self.positions.small_blind()
+    }
+
+    pub fn big_blind_seat(&self) -> SeatIndex {
+        self.positions.big_blind()
+    }
+
+    pub fn first_to_act_seat(&self) -> SeatIndex {
+        self.positions.first_to_act()
+    }
+
+    pub fn positions(&self) -> HandPositions {
+        self.positions
     }
 
     pub fn acting_seat(&self) -> Option<SeatIndex> {
@@ -79,6 +95,11 @@ impl HandState {
             .ok_or(HandStateError::HandAlreadyComplete)?;
 
         self.phase = next_phase;
+
+        if self.phase == GamePhase::PreFlop {
+            self.acting_seat = Some(self.positions.first_to_act());
+        }
+
         Ok(self.phase)
     }
 
@@ -189,6 +210,10 @@ mod tests {
         Card::new(rank, suit)
     }
 
+    fn positions() -> HandPositions {
+        HandPositions::new(SeatIndex(0), SeatIndex(1), SeatIndex(2), SeatIndex(3))
+    }
+
     fn advance_to(hand: &mut HandState, target_phase: GamePhase) {
         while hand.phase() != target_phase {
             hand.advance_phase()
@@ -198,17 +223,25 @@ mod tests {
 
     #[test]
     fn new_hand_starts_in_starting_hand_phase() {
-        let hand = HandState::new(SeatIndex(2));
+        let hand = HandState::new(HandPositions::new(
+            SeatIndex(2),
+            SeatIndex(3),
+            SeatIndex(4),
+            SeatIndex(5),
+        ));
 
         assert_eq!(hand.phase(), GamePhase::StartingHand);
         assert_eq!(hand.dealer_seat(), SeatIndex(2));
+        assert_eq!(hand.small_blind_seat(), SeatIndex(3));
+        assert_eq!(hand.big_blind_seat(), SeatIndex(4));
+        assert_eq!(hand.first_to_act_seat(), SeatIndex(5));
         assert_eq!(hand.acting_seat(), None);
         assert!(hand.board().is_empty());
     }
 
     #[test]
     fn game_phase_advances_in_expected_order() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
 
         assert_eq!(hand.advance_phase(), Ok(GamePhase::PostingBlinds));
         assert_eq!(hand.advance_phase(), Ok(GamePhase::PreFlop));
@@ -225,7 +258,7 @@ mod tests {
 
     #[test]
     fn acting_seat_can_be_set_and_cleared() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
 
         hand.set_acting_seat(Some(SeatIndex(3)));
         assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
@@ -235,8 +268,21 @@ mod tests {
     }
 
     #[test]
+    fn entering_pre_flop_sets_first_player_to_act() {
+        let mut hand = HandState::new(positions());
+
+        hand.advance_phase()
+            .expect("hand should advance to posting blinds");
+        hand.advance_phase()
+            .expect("hand should advance to pre-flop");
+
+        assert_eq!(hand.phase(), GamePhase::PreFlop);
+        assert_eq!(hand.acting_seat(), Some(SeatIndex(3)));
+    }
+
+    #[test]
     fn flop_reveals_three_board_cards() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
         advance_to(&mut hand, GamePhase::Flop);
 
         hand.reveal_flop([
@@ -251,7 +297,7 @@ mod tests {
 
     #[test]
     fn flop_cannot_be_revealed_before_flop_phase() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
 
         let result = hand.reveal_flop([
             card(Rank::Ace, Suit::Spades),
@@ -271,7 +317,7 @@ mod tests {
 
     #[test]
     fn turn_requires_existing_flop_cards() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
         advance_to(&mut hand, GamePhase::Turn);
 
         let result = hand.reveal_turn(card(Rank::Jack, Suit::Spades));
@@ -287,7 +333,7 @@ mod tests {
 
     #[test]
     fn river_requires_existing_flop_and_turn_cards() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
         advance_to(&mut hand, GamePhase::River);
 
         let result = hand.reveal_river(card(Rank::Ten, Suit::Spades));
@@ -303,7 +349,7 @@ mod tests {
 
     #[test]
     fn board_can_reveal_full_five_cards_in_order() {
-        let mut hand = HandState::new(SeatIndex(0));
+        let mut hand = HandState::new(positions());
         advance_to(&mut hand, GamePhase::Flop);
 
         hand.reveal_flop([
