@@ -70,6 +70,16 @@ impl ApiState {
 
         let _ = sender.send(message);
     }
+
+    fn remove_room_sender(&self, room_id: RoomId) -> Result<(), ApiError> {
+        let mut room_channels = self
+            .room_channels
+            .write()
+            .map_err(|_| ApiError::StateLockPoisoned)?;
+        room_channels.remove(&room_id);
+
+        Ok(())
+    }
 }
 
 impl Default for ApiState {
@@ -82,7 +92,7 @@ pub fn app(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/rooms", get(list_rooms).post(create_room))
-        .route("/rooms/{room_id}", get(get_room))
+        .route("/rooms/{room_id}", get(get_room).delete(close_room))
         .route("/rooms/{room_id}/commands", post(handle_room_command))
         .route("/rooms/{room_id}/ws", any(room_websocket))
         .with_state(state)
@@ -184,6 +194,23 @@ async fn get_room(
     let snapshot = rooms.public_snapshot(room_id)?;
 
     Ok(Json(RoomDetailsResponse { summary, snapshot }))
+}
+
+async fn close_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<StatusCode, ApiError> {
+    let room_id = RoomId(room_id);
+    let mut rooms = state
+        .rooms
+        .write()
+        .map_err(|_| ApiError::StateLockPoisoned)?;
+    rooms.close_room(room_id)?;
+    drop(rooms);
+
+    state.remove_room_sender(room_id)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn handle_room_command(
@@ -554,6 +581,68 @@ mod tests {
             )
             .await
             .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json::<ApiErrorBody>(response).await;
+        assert!(body.error.contains("404"));
+    }
+
+    #[tokio::test]
+    async fn close_room_endpoint_removes_room_from_lobby() {
+        let app = app(ApiState::default());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms",
+                CreateRoomRequest {
+                    id: RoomId(7),
+                    table_config: table_config(),
+                },
+            ))
+            .await
+            .expect("create room request should succeed");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/rooms/7")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("close room request should succeed");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rooms")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("list rooms request should succeed");
+        let body = response_json::<ListRoomsResponse>(response).await;
+        assert!(body.rooms().is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_room_endpoint_returns_not_found_for_missing_room() {
+        let app = app(ApiState::default());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/rooms/404")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("close room request should succeed");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json::<ApiErrorBody>(response).await;

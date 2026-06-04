@@ -221,6 +221,11 @@ impl RoomManager {
         self.rooms.remove(&id)
     }
 
+    pub fn close_room(&mut self, id: RoomId) -> Result<SharedRoom, RoomManagerError> {
+        self.remove_room(id)
+            .ok_or(RoomManagerError::RoomNotFound { id })
+    }
+
     pub fn room_summary(&self, id: RoomId) -> Result<RoomSummary, RoomManagerError> {
         let room = self.room(id).ok_or(RoomManagerError::RoomNotFound { id })?;
         let locked_room = room
@@ -418,6 +423,38 @@ mod tests {
             result.expect_err("missing room should be rejected"),
             RoomManagerError::RoomNotFound { id: RoomId(404) }
         );
+    }
+
+    #[test]
+    fn room_manager_closes_room() {
+        let mut manager = RoomManager::new();
+        manager
+            .create_room(RoomId(7), table_config())
+            .expect("room should be created");
+
+        let closed_room = manager.close_room(RoomId(7)).expect("room should close");
+
+        assert_eq!(
+            closed_room
+                .read()
+                .expect("room lock should be available")
+                .id(),
+            RoomId(7)
+        );
+        assert_eq!(manager.room_count(), 0);
+        assert!(manager.room(RoomId(7)).is_none());
+    }
+
+    #[test]
+    fn room_manager_rejects_closing_missing_room() {
+        let mut manager = RoomManager::new();
+
+        let result = manager.close_room(RoomId(404));
+
+        assert!(matches!(
+            result,
+            Err(RoomManagerError::RoomNotFound { id: RoomId(404) })
+        ));
     }
 
     #[test]
