@@ -9,6 +9,8 @@ use poker_engine::{
     SeatIndex, TableConfig,
 };
 
+use crate::command::{RoomCommand, RoomCommandResult};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RoomId(pub u64);
 
@@ -144,20 +146,41 @@ impl RoomManager {
         self.rooms.remove(&id)
     }
 
+    pub fn handle_room_command(
+        &self,
+        id: RoomId,
+        command: RoomCommand,
+    ) -> Result<RoomCommandResult, RoomManagerError> {
+        let room = self.room(id).ok_or(RoomManagerError::RoomNotFound { id })?;
+        let mut locked_room = room
+            .write()
+            .map_err(|_| RoomManagerError::RoomLockPoisoned { id })?;
+
+        locked_room
+            .handle_command(command)
+            .map_err(RoomManagerError::Room)
+    }
+
     pub fn room_count(&self) -> usize {
         self.rooms.len()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomManagerError {
     RoomAlreadyExists { id: RoomId },
+    RoomNotFound { id: RoomId },
+    RoomLockPoisoned { id: RoomId },
+    Room(RoomError),
 }
 
 impl fmt::Display for RoomManagerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RoomAlreadyExists { id } => write!(f, "room {} already exists", id.0),
+            Self::RoomNotFound { id } => write!(f, "room {} was not found", id.0),
+            Self::RoomLockPoisoned { id } => write!(f, "room {} lock was poisoned", id.0),
+            Self::Room(error) => write!(f, "{error}"),
         }
     }
 }
@@ -254,6 +277,41 @@ mod tests {
         assert_eq!(
             result.expect_err("duplicate room should be rejected"),
             RoomManagerError::RoomAlreadyExists { id: RoomId(7) }
+        );
+    }
+
+    #[test]
+    fn room_manager_dispatches_commands_to_shared_room() {
+        let mut manager = RoomManager::new();
+        manager
+            .create_room(RoomId(7), table_config())
+            .expect("room should be created");
+
+        let result = manager
+            .handle_room_command(
+                RoomId(7),
+                RoomCommand::SitPlayer {
+                    id: PlayerId(1),
+                    display_name: "Ada".to_string(),
+                    seat: SeatIndex(0),
+                    buy_in: 1_000,
+                },
+            )
+            .expect("command should be handled");
+
+        assert!(result.events().is_empty());
+        assert_eq!(result.snapshot().players().len(), 1);
+    }
+
+    #[test]
+    fn room_manager_rejects_commands_for_missing_rooms() {
+        let manager = RoomManager::new();
+
+        let result = manager.handle_room_command(RoomId(404), RoomCommand::PublicSnapshot);
+
+        assert_eq!(
+            result.expect_err("missing room should be rejected"),
+            RoomManagerError::RoomNotFound { id: RoomId(404) }
         );
     }
 
