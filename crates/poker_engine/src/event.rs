@@ -1,6 +1,8 @@
 use crate::{Card, ChipAmount, GamePhase, PlayerAction, SeatIndex};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameEvent {
     HandStarted {
         dealer_seat: SeatIndex,
@@ -34,7 +36,7 @@ pub enum GameEvent {
     HandFinished,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayoutEvent {
     seat: SeatIndex,
     amount: ChipAmount,

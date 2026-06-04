@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{Card, ChipAmount, HandPositions, SeatIndex};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GamePhase {
     WaitingForPlayers,
     StartingHand,

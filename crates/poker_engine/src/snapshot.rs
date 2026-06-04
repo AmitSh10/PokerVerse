@@ -1,6 +1,7 @@
 use crate::{Card, ChipAmount, GamePhase, PlayerId, PlayerStatus, SeatIndex};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSnapshot {
     players: Vec<PlayerSnapshot>,
     hand: Option<HandSnapshot>,
@@ -20,7 +21,7 @@ impl GameSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerSnapshot {
     id: PlayerId,
     display_name: String,
@@ -81,7 +82,7 @@ impl PlayerSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandSnapshot {
     phase: GamePhase,
     acting_seat: Option<SeatIndex>,
@@ -163,7 +164,7 @@ impl HandSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContributionSnapshot {
     seat: SeatIndex,
     total: ChipAmount,

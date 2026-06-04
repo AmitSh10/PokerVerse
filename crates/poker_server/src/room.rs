@@ -8,10 +8,11 @@ use poker_engine::{
     ChipAmount, GameEngine, GameEngineError, GameEvent, GameSnapshot, PlayerAction, PlayerId,
     SeatIndex, TableConfig,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::command::{RoomCommand, RoomCommandResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RoomId(pub u64);
 
 pub type SharedRoom = Arc<RwLock<Room>>;

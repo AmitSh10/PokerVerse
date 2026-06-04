@@ -1,8 +1,9 @@
 use poker_engine::{ChipAmount, GameEvent, GameSnapshot, PlayerAction, PlayerId, SeatIndex};
+use serde::{Deserialize, Serialize};
 
 use crate::{Room, RoomError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoomCommand {
     SitPlayer {
         id: PlayerId,
@@ -25,7 +26,7 @@ pub enum RoomCommand {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomCommandResult {
     events: Vec<GameEvent>,
     snapshot: GameSnapshot,
@@ -217,5 +218,34 @@ mod tests {
             2
         );
         assert!(other.visible_hole_cards().is_none());
+    }
+
+    #[test]
+    fn room_command_round_trips_through_json() {
+        let command = RoomCommand::ApplyPlayerAction {
+            seat: SeatIndex(3),
+            action: PlayerAction::Raise { amount: 40 },
+        };
+
+        let json = serde_json::to_string(&command).expect("command should serialize");
+        let decoded: RoomCommand = serde_json::from_str(&json).expect("command should deserialize");
+
+        assert_eq!(decoded, command);
+    }
+
+    #[test]
+    fn room_command_result_round_trips_through_json() {
+        let mut room = room_with_two_players();
+        let result = room
+            .handle_command(RoomCommand::StartHand {
+                dealer_seat: SeatIndex(0),
+            })
+            .expect("hand should start");
+
+        let json = serde_json::to_string(&result).expect("result should serialize");
+        let decoded: RoomCommandResult =
+            serde_json::from_str(&json).expect("result should deserialize");
+
+        assert_eq!(decoded, result);
     }
 }

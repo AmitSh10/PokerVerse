@@ -1,8 +1,9 @@
 use std::fmt;
 
 use crate::{ChipAmount, Player, PlayerId, SeatIndex};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableConfig {
     max_seats: u8,
     small_blind: ChipAmount,
