@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     net::SocketAddr,
     sync::{Arc, RwLock},
@@ -17,17 +18,55 @@ use axum::{
 use poker_engine::TableConfig;
 use poker_server::{RoomCommand, RoomCommandResult, RoomId, RoomManager, RoomManagerError};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+
+const ROOM_BROADCAST_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct ApiState {
     rooms: Arc<RwLock<RoomManager>>,
+    room_channels: Arc<RwLock<HashMap<RoomId, broadcast::Sender<WebSocketServerMessage>>>>,
 }
 
 impl ApiState {
     pub fn new(room_manager: RoomManager) -> Self {
         Self {
             rooms: Arc::new(RwLock::new(room_manager)),
+            room_channels: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    fn room_sender(
+        &self,
+        room_id: RoomId,
+    ) -> Result<broadcast::Sender<WebSocketServerMessage>, ApiError> {
+        let mut room_channels = self
+            .room_channels
+            .write()
+            .map_err(|_| ApiError::StateLockPoisoned)?;
+
+        Ok(room_channels
+            .entry(room_id)
+            .or_insert_with(|| {
+                let (sender, _) = broadcast::channel(ROOM_BROADCAST_CAPACITY);
+                sender
+            })
+            .clone())
+    }
+
+    fn subscribe_room(
+        &self,
+        room_id: RoomId,
+    ) -> Result<broadcast::Receiver<WebSocketServerMessage>, ApiError> {
+        Ok(self.room_sender(room_id)?.subscribe())
+    }
+
+    fn broadcast_room_message(&self, room_id: RoomId, message: WebSocketServerMessage) {
+        let Ok(sender) = self.room_sender(room_id) else {
+            return;
+        };
+
+        let _ = sender.send(message);
     }
 }
 
@@ -82,6 +121,9 @@ async fn create_room(
         .write()
         .map_err(|_| ApiError::StateLockPoisoned)?;
     rooms.create_room(request.id, request.table_config)?;
+    drop(rooms);
+
+    let _ = state.room_sender(request.id)?;
 
     Ok((
         StatusCode::CREATED,
@@ -95,6 +137,10 @@ async fn handle_room_command(
     Json(command): Json<RoomCommand>,
 ) -> Result<Json<RoomCommandResult>, ApiError> {
     let result = dispatch_room_command(&state, RoomId(room_id), command)?;
+    state.broadcast_room_message(
+        RoomId(room_id),
+        WebSocketServerMessage::CommandResult(result.clone()),
+    );
 
     Ok(Json(result))
 }
@@ -110,27 +156,82 @@ async fn room_websocket(
 }
 
 async fn handle_room_socket(mut socket: WebSocket, state: ApiState, room_id: RoomId) {
-    while let Some(message) = socket.recv().await {
-        let response = match message {
-            Ok(Message::Text(text)) => handle_room_socket_text(&state, room_id, text.as_ref()),
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
-            Ok(Message::Binary(_)) => WebSocketServerMessage::Error(ApiErrorBody {
-                error: "expected text JSON room command".to_string(),
+    let Ok(mut room_receiver) = state.subscribe_room(room_id) else {
+        let _ = send_room_socket_message(
+            &mut socket,
+            &WebSocketServerMessage::Error(ApiErrorBody {
+                error: "room broadcast channel unavailable".to_string(),
             }),
-            Err(error) => WebSocketServerMessage::Error(ApiErrorBody {
-                error: format!("websocket receive error: {error}"),
-            }),
-        };
+        )
+        .await;
+        return;
+    };
 
-        let Ok(payload) = serde_json::to_string(&response) else {
-            break;
-        };
+    loop {
+        tokio::select! {
+            message = socket.recv() => {
+                let Some(message) = message else {
+                    break;
+                };
 
-        if socket.send(Message::Text(payload.into())).await.is_err() {
-            break;
+                let Some(response) = handle_room_socket_message(&state, room_id, message) else {
+                    break;
+                };
+
+                if matches!(response, WebSocketServerMessage::Ignored) {
+                    continue;
+                } else if matches!(response, WebSocketServerMessage::CommandResult(_)) {
+                    state.broadcast_room_message(room_id, response);
+                } else if send_room_socket_message(&mut socket, &response).await.is_err() {
+                    break;
+                }
+            }
+            message = room_receiver.recv() => {
+                let response = match message {
+                    Ok(message) => message,
+                    Err(broadcast::error::RecvError::Lagged(_)) => WebSocketServerMessage::Error(ApiErrorBody {
+                        error: "room websocket receiver lagged behind".to_string(),
+                    }),
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+
+                if send_room_socket_message(&mut socket, &response).await.is_err() {
+                    break;
+                }
+            }
         }
     }
+}
+
+async fn send_room_socket_message(
+    socket: &mut WebSocket,
+    response: &WebSocketServerMessage,
+) -> Result<(), axum::Error> {
+    let Ok(payload) = serde_json::to_string(response) else {
+        return Ok(());
+    };
+
+    socket.send(Message::Text(payload.into())).await
+}
+
+fn handle_room_socket_message(
+    state: &ApiState,
+    room_id: RoomId,
+    message: Result<Message, axum::Error>,
+) -> Option<WebSocketServerMessage> {
+    Some(match message {
+        Ok(Message::Text(text)) => handle_room_socket_text(state, room_id, text.as_ref()),
+        Ok(Message::Close(_)) => return None,
+        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
+            return Some(WebSocketServerMessage::Ignored);
+        }
+        Ok(Message::Binary(_)) => WebSocketServerMessage::Error(ApiErrorBody {
+            error: "expected text JSON room command".to_string(),
+        }),
+        Err(error) => WebSocketServerMessage::Error(ApiErrorBody {
+            error: format!("websocket receive error: {error}"),
+        }),
+    })
 }
 
 fn handle_room_socket_text(
@@ -172,6 +273,7 @@ fn dispatch_room_command(
 pub enum WebSocketServerMessage {
     CommandResult(RoomCommandResult),
     Error(ApiErrorBody),
+    Ignored,
 }
 
 #[derive(Debug)]
@@ -331,6 +433,78 @@ mod tests {
         let result = response_json::<RoomCommandResult>(response).await;
         assert!(result.events().is_empty());
         assert_eq!(result.snapshot().players().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_broadcasts_result_to_room_subscribers() {
+        let state = ApiState::default();
+        let app = app(state.clone());
+        let create_request = CreateRoomRequest {
+            id: RoomId(7),
+            table_config: table_config(),
+        };
+        app.clone()
+            .oneshot(json_request("POST", "/rooms", create_request))
+            .await
+            .expect("create room request should succeed");
+        let mut receiver = state
+            .subscribe_room(RoomId(7))
+            .expect("room subscription should be created");
+
+        let command = RoomCommand::SitPlayer {
+            id: PlayerId(1),
+            display_name: "Ada".to_string(),
+            seat: SeatIndex(0),
+            buy_in: 1_000,
+        };
+        app.oneshot(json_request("POST", "/rooms/7/commands", command))
+            .await
+            .expect("command request should succeed");
+
+        let message = receiver
+            .try_recv()
+            .expect("subscriber should receive command result");
+        let WebSocketServerMessage::CommandResult(result) = message else {
+            panic!("expected command result broadcast");
+        };
+        assert_eq!(result.snapshot().players().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn command_endpoint_only_broadcasts_to_matching_room() {
+        let state = ApiState::default();
+        let app = app(state.clone());
+        for id in [RoomId(7), RoomId(8)] {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/rooms",
+                    CreateRoomRequest {
+                        id,
+                        table_config: table_config(),
+                    },
+                ))
+                .await
+                .expect("create room request should succeed");
+        }
+        let mut other_room_receiver = state
+            .subscribe_room(RoomId(8))
+            .expect("room subscription should be created");
+
+        app.oneshot(json_request(
+            "POST",
+            "/rooms/7/commands",
+            RoomCommand::SitPlayer {
+                id: PlayerId(1),
+                display_name: "Ada".to_string(),
+                seat: SeatIndex(0),
+                buy_in: 1_000,
+            },
+        ))
+        .await
+        .expect("command request should succeed");
+
+        assert!(other_room_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
