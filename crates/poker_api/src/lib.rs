@@ -21,7 +21,7 @@ use poker_server::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 const ROOM_BROADCAST_CAPACITY: usize = 128;
 pub const API_ADDR_ENV: &str = "POKERVERSE_API_ADDR";
@@ -165,6 +165,7 @@ pub fn app(state: ApiState) -> Router {
         .route("/rooms/{room_id}/commands", post(handle_room_command))
         .route("/rooms/{room_id}/ws", any(room_websocket))
         .layer(cors_layer())
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 

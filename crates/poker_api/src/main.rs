@@ -2,6 +2,8 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    init_tracing();
+
     let config = match poker_api::ApiConfig::from_env() {
         Ok(config) => config,
         Err(error) => {
@@ -18,4 +20,12 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("poker_api=info,tower_http=info"));
+    let _ = fmt().with_env_filter(filter).try_init();
 }
