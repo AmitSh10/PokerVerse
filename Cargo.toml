@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/poker_engine", "crates/poker_server"]
+members = ["crates/poker_api", "crates/poker_engine", "crates/poker_server"]
 resolver = "2"
