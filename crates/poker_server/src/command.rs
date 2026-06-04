@@ -11,6 +11,9 @@ pub enum RoomCommand {
         seat: SeatIndex,
         buy_in: ChipAmount,
     },
+    LeaveSeat {
+        seat: SeatIndex,
+    },
     StartHand {
         dealer_seat: SeatIndex,
     },
@@ -56,6 +59,10 @@ impl Room {
                 buy_in,
             } => {
                 self.sit_player(id, display_name, seat, buy_in)?;
+                (self.drain_events(), self.public_snapshot())
+            }
+            RoomCommand::LeaveSeat { seat } => {
+                self.leave_seat(seat)?;
                 (self.drain_events(), self.public_snapshot())
             }
             RoomCommand::StartHand { dealer_seat } => {
@@ -129,6 +136,28 @@ mod tests {
 
         assert!(result.events().is_empty());
         assert_eq!(result.snapshot().players().len(), 1);
+    }
+
+    #[test]
+    fn leave_seat_command_returns_updated_snapshot_without_events() {
+        let mut room = room_with_two_players();
+
+        let result = room
+            .handle_command(RoomCommand::LeaveSeat { seat: SeatIndex(0) })
+            .expect("player should leave their seat");
+
+        assert!(result.events().is_empty());
+        assert_eq!(result.snapshot().players().len(), 1);
+        assert_eq!(result.snapshot().players()[0].seat(), SeatIndex(3));
+    }
+
+    #[test]
+    fn leave_seat_command_rejects_empty_seat() {
+        let mut room = room_with_two_players();
+
+        let result = room.handle_command(RoomCommand::LeaveSeat { seat: SeatIndex(5) });
+
+        assert!(result.is_err());
     }
 
     #[test]

@@ -79,6 +79,15 @@ impl Room {
         Ok(())
     }
 
+    pub fn leave_seat(&mut self, seat: SeatIndex) -> Result<(), RoomError> {
+        self.engine
+            .table_mut()
+            .leave_seat(seat)
+            .map_err(GameEngineError::from)?;
+
+        Ok(())
+    }
+
     pub fn start_hand(&mut self, dealer_seat: SeatIndex) -> Result<Vec<GameEvent>, RoomError> {
         self.engine.start_hand(dealer_seat)?;
         Ok(self.engine.drain_events())
@@ -428,6 +437,18 @@ mod tests {
             .expect("hand should start through room");
 
         assert_eq!(room.summary().active_phase(), Some(GamePhase::StartingHand));
+    }
+
+    #[test]
+    fn room_leave_seat_removes_player_from_snapshot_and_summary() {
+        let mut room = room_with_two_players();
+
+        room.leave_seat(SeatIndex(0))
+            .expect("player should leave their seat");
+
+        assert_eq!(room.public_snapshot().players().len(), 1);
+        assert_eq!(room.summary().seated_player_count(), 1);
+        assert!(!room.summary().can_start_hand());
     }
 
     #[test]

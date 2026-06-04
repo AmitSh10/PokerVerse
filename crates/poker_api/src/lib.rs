@@ -590,6 +590,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_endpoint_handles_leave_seat_command() {
+        let app = app(ApiState::default());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms",
+                CreateRoomRequest {
+                    id: RoomId(7),
+                    table_config: table_config(),
+                },
+            ))
+            .await
+            .expect("create room request should succeed");
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::SitPlayer {
+                    id: PlayerId(1),
+                    display_name: "Ada".to_string(),
+                    seat: SeatIndex(0),
+                    buy_in: 1_000,
+                },
+            ))
+            .await
+            .expect("sit player request should succeed");
+
+        let response = app
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::LeaveSeat { seat: SeatIndex(0) },
+            ))
+            .await
+            .expect("leave seat request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let result = response_json::<RoomCommandResult>(response).await;
+        assert!(result.events().is_empty());
+        assert!(result.snapshot().players().is_empty());
+    }
+
+    #[tokio::test]
     async fn command_endpoint_broadcasts_result_to_room_subscribers() {
         let state = ApiState::default();
         let app = app(state.clone());
