@@ -1,9 +1,10 @@
 use std::fmt;
 
 use crate::{
-    Card, ChipAmount, Deck, EvaluatedHand, GamePhase, HandEvaluationError, HandState,
-    HandStateError, Player, PlayerAction, PlayerError, PlayerId, PlayerStatus, PotContribution,
-    SeatIndex, Table, TableConfig, TableError, calculate_side_pots, evaluate_best_hand,
+    Card, ChipAmount, ContributionSnapshot, Deck, EvaluatedHand, GamePhase, GameSnapshot,
+    HandEvaluationError, HandSnapshot, HandState, HandStateError, Player, PlayerAction,
+    PlayerError, PlayerId, PlayerSnapshot, PlayerStatus, PotContribution, SeatIndex, Table,
+    TableConfig, TableError, calculate_side_pots, evaluate_best_hand,
 };
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,18 @@ impl GameEngine {
 
     pub fn deck(&self) -> Option<&Deck> {
         self.deck.as_ref()
+    }
+
+    pub fn public_snapshot(&self) -> GameSnapshot {
+        self.snapshot_for_viewer(None)
+    }
+
+    pub fn private_snapshot_for(&self, seat: SeatIndex) -> Result<GameSnapshot, GameEngineError> {
+        if !self.table.occupied_seats().contains(&seat) {
+            return Err(TableError::SeatEmpty { seat }.into());
+        }
+
+        Ok(self.snapshot_for_viewer(Some(seat)))
     }
 
     pub fn start_hand(&mut self, dealer_seat: SeatIndex) -> Result<&HandState, GameEngineError> {
@@ -330,6 +343,54 @@ impl GameEngine {
         }
 
         awarded_amounts.sort_by_key(|(seat, _)| seat.0);
+    }
+
+    fn snapshot_for_viewer(&self, viewer_seat: Option<SeatIndex>) -> GameSnapshot {
+        let players = self
+            .table
+            .occupied_seats()
+            .into_iter()
+            .filter_map(|seat| {
+                self.table.player_at(seat).map(|player| {
+                    let visible_hole_cards =
+                        (viewer_seat == Some(seat)).then(|| player.hole_cards().to_vec());
+
+                    PlayerSnapshot::new(
+                        player.id(),
+                        player.display_name(),
+                        seat,
+                        player.stack(),
+                        player.status(),
+                        player.hole_cards().len(),
+                        visible_hole_cards,
+                    )
+                })
+            })
+            .collect();
+        let hand = self.current_hand.as_ref().map(|hand| {
+            let mut contributions = hand
+                .contributions()
+                .map(|(seat, total)| {
+                    ContributionSnapshot::new(seat, total, hand.round_contribution_for(seat))
+                })
+                .collect::<Vec<_>>();
+            contributions.sort_by_key(|contribution| contribution.seat().0);
+
+            HandSnapshot::new(
+                hand.phase(),
+                hand.acting_seat(),
+                hand.board().to_vec(),
+                hand.pot(),
+                hand.current_bet(),
+                hand.dealer_seat(),
+                hand.small_blind_seat(),
+                hand.big_blind_seat(),
+                hand.first_to_act_seat(),
+                contributions,
+            )
+        });
+
+        GameSnapshot::new(players, hand)
     }
 
     pub fn apply_player_action(
@@ -1072,6 +1133,74 @@ mod tests {
     }
 
     #[test]
+    fn public_snapshot_hides_hole_cards_but_reports_counts() {
+        let mut engine = engine_with_two_players();
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+
+        let snapshot = engine.public_snapshot();
+
+        assert_eq!(snapshot.players().len(), 2);
+        assert!(
+            snapshot
+                .players()
+                .iter()
+                .all(|player| player.hole_card_count() == Player::MAX_HOLE_CARDS)
+        );
+        assert!(
+            snapshot
+                .players()
+                .iter()
+                .all(|player| player.visible_hole_cards().is_none())
+        );
+        assert_eq!(
+            snapshot.hand().expect("hand should be active").phase(),
+            GamePhase::StartingHand
+        );
+    }
+
+    #[test]
+    fn private_snapshot_reveals_only_requested_players_hole_cards() {
+        let mut engine = engine_with_two_players();
+        engine
+            .start_hand(SeatIndex(0))
+            .expect("hand should start with two players");
+
+        let snapshot = engine
+            .private_snapshot_for(SeatIndex(0))
+            .expect("seated player should have a private snapshot");
+        let own_player = snapshot
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("own player should be present");
+        let other_player = snapshot
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(3))
+            .expect("other player should be present");
+
+        assert_eq!(
+            own_player.visible_hole_cards().map(<[Card]>::len),
+            Some(Player::MAX_HOLE_CARDS)
+        );
+        assert!(other_player.visible_hole_cards().is_none());
+    }
+
+    #[test]
+    fn private_snapshot_requires_occupied_seat() {
+        let engine = engine_with_two_players();
+
+        assert_eq!(
+            engine.private_snapshot_for(SeatIndex(2)),
+            Err(GameEngineError::Table(TableError::SeatEmpty {
+                seat: SeatIndex(2),
+            }))
+        );
+    }
+
+    #[test]
     fn start_hand_rejects_second_active_hand() {
         let mut engine = engine_with_two_players();
         engine
@@ -1156,6 +1285,27 @@ mod tests {
                 .stack(),
             990
         );
+    }
+
+    #[test]
+    fn snapshot_reports_hand_pot_current_bet_and_contributions() {
+        let mut engine = engine_with_started_hand();
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+
+        let snapshot = engine.public_snapshot();
+        let hand = snapshot.hand().expect("hand should be active");
+
+        assert_eq!(hand.phase(), GamePhase::PostingBlinds);
+        assert_eq!(hand.pot(), 15);
+        assert_eq!(hand.current_bet(), 10);
+        assert_eq!(hand.contributions().len(), 2);
+        assert_eq!(hand.contributions()[0].seat(), SeatIndex(0));
+        assert_eq!(hand.contributions()[0].total(), 5);
+        assert_eq!(hand.contributions()[0].round(), 5);
+        assert_eq!(hand.contributions()[1].seat(), SeatIndex(3));
+        assert_eq!(hand.contributions()[1].total(), 10);
+        assert_eq!(hand.contributions()[1].round(), 10);
     }
 
     #[test]

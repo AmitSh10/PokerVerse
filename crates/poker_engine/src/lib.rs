@@ -5,6 +5,7 @@ pub mod engine;
 pub mod hand_eval;
 pub mod player;
 pub mod pot;
+pub mod snapshot;
 pub mod state;
 pub mod table;
 
@@ -19,5 +20,6 @@ pub use hand_eval::{
 };
 pub use player::{ChipAmount, Player, PlayerError, PlayerId, PlayerStatus, SeatIndex};
 pub use pot::{PotContribution, SidePot, calculate_side_pots};
+pub use snapshot::{ContributionSnapshot, GameSnapshot, HandSnapshot, PlayerSnapshot};
 pub use state::{GamePhase, HandState, HandStateError};
 pub use table::{HandPositions, Table, TableConfig, TableConfigError, TableError};
