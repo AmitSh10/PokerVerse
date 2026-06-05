@@ -278,6 +278,21 @@ impl RoomManager {
         Ok(locked_room.public_snapshot())
     }
 
+    pub fn private_snapshot_for(
+        &self,
+        id: RoomId,
+        seat: SeatIndex,
+    ) -> Result<GameSnapshot, RoomManagerError> {
+        let room = self.room(id).ok_or(RoomManagerError::RoomNotFound { id })?;
+        let locked_room = room
+            .read()
+            .map_err(|_| RoomManagerError::RoomLockPoisoned { id })?;
+
+        locked_room
+            .private_snapshot_for(seat)
+            .map_err(RoomManagerError::Room)
+    }
+
     pub fn handle_room_command(
         &self,
         id: RoomId,
@@ -584,6 +599,61 @@ mod tests {
             .expect("snapshot should be returned");
 
         assert_eq!(snapshot.players().len(), 1);
+    }
+
+    #[test]
+    fn room_manager_returns_private_snapshot_for_viewer() {
+        let mut manager = RoomManager::new();
+        manager
+            .create_room(RoomId(7), table_config())
+            .expect("room should be created");
+        for (id, name, seat) in [
+            (PlayerId(1), "Ada", SeatIndex(0)),
+            (PlayerId(2), "Linus", SeatIndex(3)),
+        ] {
+            manager
+                .handle_room_command(
+                    RoomId(7),
+                    RoomCommand::SitPlayer {
+                        id,
+                        display_name: name.to_string(),
+                        seat,
+                        buy_in: 1_000,
+                    },
+                )
+                .expect("player should sit");
+        }
+        manager
+            .handle_room_command(
+                RoomId(7),
+                RoomCommand::StartHand {
+                    dealer_seat: SeatIndex(0),
+                },
+            )
+            .expect("hand should start");
+
+        let snapshot = manager
+            .private_snapshot_for(RoomId(7), SeatIndex(0))
+            .expect("private snapshot should be returned");
+        let viewer = snapshot
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("viewer should be in snapshot");
+        let other = snapshot
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(3))
+            .expect("other player should be in snapshot");
+
+        assert_eq!(
+            viewer
+                .visible_hole_cards()
+                .expect("viewer cards should be visible")
+                .len(),
+            2
+        );
+        assert!(other.visible_hole_cards().is_none());
     }
 
     #[test]

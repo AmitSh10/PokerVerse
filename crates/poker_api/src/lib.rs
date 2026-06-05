@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use poker_engine::{GameSnapshot, TableConfig};
+use poker_engine::{GameSnapshot, SeatIndex, TableConfig};
 use poker_server::{
     RoomCommand, RoomCommandResult, RoomId, RoomManager, RoomManagerError, RoomSummary,
 };
@@ -162,6 +162,10 @@ pub fn app(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/rooms", get(list_rooms).post(create_room))
         .route("/rooms/{room_id}", get(get_room).delete(close_room))
+        .route(
+            "/rooms/{room_id}/seats/{seat}/snapshot",
+            get(get_private_snapshot),
+        )
         .route("/rooms/{room_id}/commands", post(handle_room_command))
         .route("/rooms/{room_id}/ws", any(room_websocket))
         .layer(cors_layer())
@@ -269,6 +273,19 @@ async fn get_room(
     let snapshot = rooms.public_snapshot(room_id)?;
 
     Ok(Json(RoomDetailsResponse { summary, snapshot }))
+}
+
+async fn get_private_snapshot(
+    Path((room_id, seat)): Path<(u64, u8)>,
+    State(state): State<ApiState>,
+) -> Result<Json<GameSnapshot>, ApiError> {
+    let rooms = state
+        .rooms
+        .read()
+        .map_err(|_| ApiError::StateLockPoisoned)?;
+    let snapshot = rooms.private_snapshot_for(RoomId(room_id), SeatIndex(seat))?;
+
+    Ok(Json(snapshot))
 }
 
 async fn close_room(
@@ -792,6 +809,112 @@ mod tests {
         let body = response_json::<ApiErrorBody>(response).await;
         assert_eq!(body.code(), ApiErrorCode::RoomNotFound);
         assert!(body.error().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn private_snapshot_endpoint_reveals_only_requested_seat_cards() {
+        let app = app(ApiState::default());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms",
+                CreateRoomRequest {
+                    id: RoomId(7),
+                    table_config: table_config(),
+                },
+            ))
+            .await
+            .expect("create room request should succeed");
+        for (id, name, seat) in [
+            (PlayerId(1), "Ada", SeatIndex(0)),
+            (PlayerId(2), "Linus", SeatIndex(3)),
+        ] {
+            app.clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/rooms/7/commands",
+                    RoomCommand::SitPlayer {
+                        id,
+                        display_name: name.to_string(),
+                        seat,
+                        buy_in: 1_000,
+                    },
+                ))
+                .await
+                .expect("sit player request should succeed");
+        }
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms/7/commands",
+                RoomCommand::StartHand {
+                    dealer_seat: SeatIndex(0),
+                },
+            ))
+            .await
+            .expect("start hand request should succeed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rooms/7/seats/0/snapshot")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let snapshot = response_json::<GameSnapshot>(response).await;
+        let viewer = snapshot
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(0))
+            .expect("viewer should be in snapshot");
+        let other = snapshot
+            .players()
+            .iter()
+            .find(|player| player.seat() == SeatIndex(3))
+            .expect("other player should be in snapshot");
+        assert_eq!(
+            viewer
+                .visible_hole_cards()
+                .expect("viewer cards should be visible")
+                .len(),
+            2
+        );
+        assert!(other.visible_hole_cards().is_none());
+    }
+
+    #[tokio::test]
+    async fn private_snapshot_endpoint_rejects_empty_seat() {
+        let app = app(ApiState::default());
+        app.clone()
+            .oneshot(json_request(
+                "POST",
+                "/rooms",
+                CreateRoomRequest {
+                    id: RoomId(7),
+                    table_config: table_config(),
+                },
+            ))
+            .await
+            .expect("create room request should succeed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rooms/7/seats/5/snapshot")
+                    .body(Body::empty())
+                    .expect("request should be valid"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json::<ApiErrorBody>(response).await;
+        assert_eq!(body.code(), ApiErrorCode::InvalidRoomCommand);
+        assert!(body.error().contains("seat 5 is empty"));
     }
 
     #[tokio::test]
