@@ -35,6 +35,7 @@ export default function RoomPage() {
     queryKey: ["room", roomId],
     queryFn: () => api.getRoom(roomId),
     enabled: !Number.isNaN(roomId),
+    refetchOnWindowFocus: false,
   });
 
   // Seed snapshot from HTTP on first load

@@ -15,8 +15,10 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
   const [actionError, setActionError] = useState<string | null>(null);
 
   const hand = snapshot.hand;
+  const BETTING_PHASES = ["PreFlop", "Flop", "Turn", "River"];
 
   if (!hand || viewerSeat === null) return null;
+  if (!BETTING_PHASES.includes(hand.phase)) return null;
   if (hand.acting_seat !== viewerSeat) {
     return (
       <div className="text-center text-gray-500 text-sm py-3">

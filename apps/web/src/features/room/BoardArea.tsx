@@ -10,10 +10,19 @@ export function BoardArea({ hand }: { hand: HandSnapshot | null }) {
     );
   }
 
+  const isShowdown = hand.phase === "Showdown";
+  const isComplete = hand.phase === "HandComplete";
+
   return (
     <div className="flex flex-col items-center gap-2">
       {/* Phase label */}
-      <span className="text-xs text-gray-400 uppercase tracking-widest">{hand.phase}</span>
+      <span
+        className={`text-xs uppercase tracking-widest ${
+          isShowdown ? "text-yellow-400 font-semibold" : "text-gray-400"
+        }`}
+      >
+        {hand.phase}
+      </span>
 
       {/* Community cards */}
       <div className="flex gap-1.5">
@@ -40,6 +49,16 @@ export function BoardArea({ hand }: { hand: HandSnapshot | null }) {
           </>
         )}
       </div>
+
+      {/* Showdown / complete hints */}
+      {isShowdown && (
+        <p className="text-yellow-300 text-xs animate-pulse">
+          ↓ Click "Advance Phase" to reveal the winner
+        </p>
+      )}
+      {isComplete && (
+        <p className="text-green-400 text-xs">Hand complete — start a new hand</p>
+      )}
     </div>
   );
 }
