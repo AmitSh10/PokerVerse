@@ -89,6 +89,15 @@ export default function RoomPage() {
     }
   };
 
+  const handleCloseRoom = async () => {
+    try {
+      await api.deleteRoom(roomId);
+      navigate("/");
+    } catch (e) {
+      setLastError((e as Error).message);
+    }
+  };
+
   const handleRefresh = () => {
     qc.invalidateQueries({ queryKey: ["room", roomId] });
     const fetch =
@@ -138,6 +147,13 @@ export default function RoomPage() {
             <span className="text-blue-400 text-xs">Viewing as seat {viewerSeat}</span>
           )}
           <ConnectionBadge status={status} />
+          <button
+            onClick={handleCloseRoom}
+            className="text-gray-600 hover:text-red-400 text-xs transition-colors border border-gray-700 hover:border-red-800 px-2 py-1 rounded"
+            title="Close room"
+          >
+            Close room
+          </button>
         </div>
       </header>
 
