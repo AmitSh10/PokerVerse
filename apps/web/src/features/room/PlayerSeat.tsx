@@ -90,7 +90,7 @@ export function PlayerSeat({
           ${isActing ? "border-yellow-400 bg-gray-700" : "border-gray-600 bg-gray-800"}
           ${isViewer ? "ring-1 ring-blue-400" : ""}
         `}
-        onClick={() => player && onViewerSeatChange(isViewer ? null : seatIndex)}
+        onClick={() => player && !isViewer && onViewerSeatChange(seatIndex)}
       >
         {player ? (
           <>
