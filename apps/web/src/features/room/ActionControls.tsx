@@ -5,11 +5,12 @@ import { commands, type RoomCommand } from "../../api/commands";
 interface ActionControlsProps {
   snapshot: GameSnapshot;
   viewerSeat: SeatIndex | null;
-  onCommand: (cmd: RoomCommand) => void;
+  onCommand: (cmd: RoomCommand) => Promise<void>;
 }
 
 export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionControlsProps) {
   const [betAmount, setBetAmount] = useState("");
+  const [pending, setPending] = useState(false);
   const hand = snapshot.hand;
 
   if (!hand || viewerSeat === null) return null;
@@ -22,9 +23,21 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
   }
 
   const player = snapshot.players.find((p) => p.seat === viewerSeat);
-  const canCheck = hand.current_bet === 0 || (hand.contributions.find((c) => c.seat === viewerSeat)?.round ?? 0) >= hand.current_bet;
-  const callAmount = hand.current_bet - (hand.contributions.find((c) => c.seat === viewerSeat)?.round ?? 0);
+  const roundContrib = hand.contributions.find((c) => c.seat === viewerSeat)?.round ?? 0;
+  const canCheck = hand.current_bet === 0 || roundContrib >= hand.current_bet;
+  const callAmount = hand.current_bet - roundContrib;
   const amount = parseInt(betAmount, 10);
+
+  const act = async (cmd: RoomCommand) => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await onCommand(cmd);
+      setBetAmount("");
+    } finally {
+      setPending(false);
+    }
+  };
 
   const btn = (label: string, cmd: RoomCommand, variant = "default") => {
     const base = "px-4 py-2 rounded font-semibold text-sm transition-colors disabled:opacity-40";
@@ -35,7 +48,11 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
       success: "bg-green-700 hover:bg-green-600 text-white",
     };
     return (
-      <button className={`${base} ${styles[variant]}`} onClick={() => onCommand(cmd)}>
+      <button
+        disabled={pending}
+        className={`${base} ${styles[variant]}`}
+        onClick={() => act(cmd)}
+      >
         {label}
       </button>
     );
@@ -62,7 +79,9 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
           />
           {btn(
             hand.current_bet > 0 ? "Raise" : "Bet",
-            hand.current_bet > 0 ? commands.raise(viewerSeat, amount) : commands.bet(viewerSeat, amount),
+            hand.current_bet > 0
+              ? commands.raise(viewerSeat, amount)
+              : commands.bet(viewerSeat, amount),
             "success",
           )}
         </div>

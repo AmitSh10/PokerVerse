@@ -9,7 +9,7 @@ interface PlayerSeatProps {
   hand: HandSnapshot | null;
   viewerSeat: SeatIndex | null;
   onViewerSeatChange: (seat: SeatIndex | null) => void;
-  onCommand: (cmd: RoomCommand) => void;
+  onCommand: (cmd: RoomCommand) => Promise<void>;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -31,6 +31,7 @@ export function PlayerSeat({
   const [showSitForm, setShowSitForm] = useState(false);
   const [name, setName] = useState("");
   const [buyIn, setBuyIn] = useState("500");
+  const [pending, setPending] = useState(false);
 
   const isActing = hand?.acting_seat === seatIndex;
   const isViewer = viewerSeat === seatIndex;
@@ -38,12 +39,23 @@ export function PlayerSeat({
   const isSB = hand?.small_blind_seat === seatIndex;
   const isBB = hand?.big_blind_seat === seatIndex;
 
-  const handleSit = () => {
-    if (!name.trim()) return;
-    onCommand(commands.sitPlayer(Date.now(), name.trim(), seatIndex, parseInt(buyIn, 10)));
-    onViewerSeatChange(seatIndex);
-    setShowSitForm(false);
-    setName("");
+  const handleSit = async () => {
+    if (!name.trim() || pending) return;
+    setPending(true);
+    try {
+      await onCommand(commands.sitPlayer(Date.now(), name.trim(), seatIndex, parseInt(buyIn, 10)));
+      onViewerSeatChange(seatIndex);
+      setShowSitForm(false);
+      setName("");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const handleLeave = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await onCommand(commands.leaveSeat(seatIndex));
+    onViewerSeatChange(null);
   };
 
   return (
@@ -102,11 +114,7 @@ export function PlayerSeat({
             {/* Leave seat */}
             {isViewer && (
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onCommand(commands.leaveSeat(seatIndex));
-                  onViewerSeatChange(null);
-                }}
+                onClick={handleLeave}
                 className="mt-2 text-xs text-red-400 hover:text-red-300"
               >
                 Leave
@@ -152,9 +160,10 @@ export function PlayerSeat({
           <div className="flex gap-1">
             <button
               onClick={handleSit}
-              className="flex-1 bg-green-700 hover:bg-green-600 text-white text-xs py-1 rounded"
+              disabled={pending}
+              className="flex-1 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-xs py-1 rounded"
             >
-              Sit
+              {pending ? "…" : "Sit"}
             </button>
             <button
               onClick={() => setShowSitForm(false)}

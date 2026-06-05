@@ -12,35 +12,36 @@ const RECONNECT_DELAY_MS = 2_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
 export class RoomSocket {
+  private readonly roomId: number;
   private ws: WebSocket | null = null;
   private messageHandlers = new Set<MessageHandler>();
   private statusHandlers = new Set<StatusHandler>();
   private reconnectAttempts = 0;
   private closed = false;
 
-  private readonly roomId: number;
-
   constructor(roomId: number) {
     this.roomId = roomId;
   }
 
   connect(): void {
-    if (this.ws) return;
-    this.closed = false;
+    if (this.closed || this.ws) return;
     this.open();
   }
 
   private open(): void {
     const url = `${WS_BASE_URL}/rooms/${this.roomId}/ws`;
-    this.ws = new WebSocket(url);
+    const ws = new WebSocket(url);
+    this.ws = ws;
     this.emit("connecting");
 
-    this.ws.onopen = () => {
+    ws.onopen = () => {
+      if (this.ws !== ws) return; // superseded by a newer socket
       this.reconnectAttempts = 0;
       this.emit("connected");
     };
 
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return;
       try {
         const msg = JSON.parse(event.data as string) as WsServerMessage;
         this.messageHandlers.forEach((h) => h(msg));
@@ -49,13 +50,14 @@ export class RoomSocket {
       }
     };
 
-    this.ws.onclose = () => {
+    ws.onclose = () => {
+      if (this.ws !== ws) return; // already replaced or closed intentionally
       this.ws = null;
       if (!this.closed) this.scheduleReconnect();
     };
 
-    this.ws.onerror = () => {
-      this.ws?.close();
+    ws.onerror = () => {
+      ws.close();
     };
   }
 
@@ -79,8 +81,17 @@ export class RoomSocket {
 
   close(): void {
     this.closed = true;
-    this.ws?.close();
+    const ws = this.ws;
     this.ws = null;
+    // Only close if the socket has progressed past CONNECTING to avoid the
+    // "WebSocket is closed before the connection is established" warning in
+    // React StrictMode's double-invoke cleanup.
+    if (ws && ws.readyState !== WebSocket.CONNECTING) {
+      ws.close();
+    } else if (ws) {
+      // Still connecting — let onopen fire then close immediately
+      ws.onopen = () => ws.close();
+    }
     this.emit("closed");
   }
 

@@ -19,7 +19,8 @@ export default function RoomPage() {
   const qc = useQueryClient();
 
   const { viewerSeat, setViewerSeat } = useRoomStore();
-  const { send, status, lastResult } = useRoomSocket(roomId);
+  // WS is receive-only: broadcasts from other players arrive here.
+  const { status, lastResult } = useRoomSocket(roomId);
 
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
@@ -32,7 +33,7 @@ export default function RoomPage() {
     enabled: !Number.isNaN(roomId),
   });
 
-  // Seed snapshot from HTTP
+  // Seed snapshot from HTTP on first load
   useEffect(() => {
     if (roomDetails && !snapshot) setSnapshot(roomDetails.snapshot);
   }, [roomDetails, snapshot]);
@@ -47,7 +48,7 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerSeat]);
 
-  // Apply WS updates
+  // Apply WS broadcasts (other players' actions or server-pushed updates)
   useEffect(() => {
     if (!lastResult) return;
     setSnapshot(lastResult.snapshot);
@@ -55,12 +56,9 @@ export default function RoomPage() {
     setLastError(null);
   }, [lastResult]);
 
-  // Send via WS during an active hand; use HTTP otherwise
-  const handleCommand = (cmd: RoomCommand) => {
-    send(cmd);
-  };
-
-  const handleHttpCommand = async (cmd: RoomCommand): Promise<void> => {
+  // All commands go via HTTP for reliable synchronous confirmation.
+  // The WS keeps other connected clients in sync automatically.
+  const handleCommand = async (cmd: RoomCommand): Promise<void> => {
     setLastError(null);
     try {
       const result = await api.sendCommand(roomId, cmd);
@@ -71,31 +69,32 @@ export default function RoomPage() {
     }
   };
 
-  // Runs the full sequence to get from idle → PreFlop in one click:
+  // Runs the full sequence to reach PreFlop in one click:
   // StartHand → AdvancePhase (PostingBlinds) → PostBlinds → AdvancePhase (PreFlop)
   const handleQuickStart = async (dealerSeat: SeatIndex): Promise<void> => {
     setLastError(null);
     try {
-      await runCommand(commands.startHand(dealerSeat));
-      await runCommand(commands.advanceHandPhase());
-      await runCommand(commands.postBlinds());
-      await runCommand(commands.advanceHandPhase());
+      for (const cmd of [
+        commands.startHand(dealerSeat),
+        commands.advanceHandPhase(),
+        commands.postBlinds(),
+        commands.advanceHandPhase(),
+      ]) {
+        const result = await api.sendCommand(roomId, cmd);
+        setSnapshot(result.snapshot);
+        setEvents((prev) => [...prev, ...result.events]);
+      }
     } catch (e) {
       setLastError((e as Error).message);
     }
   };
 
-  const runCommand = async (cmd: RoomCommand) => {
-    const result = await api.sendCommand(roomId, cmd);
-    setSnapshot(result.snapshot);
-    setEvents((prev) => [...prev, ...result.events]);
-  };
-
   const handleRefresh = () => {
     qc.invalidateQueries({ queryKey: ["room", roomId] });
-    const fetch = viewerSeat !== null
-      ? api.getSeatSnapshot(roomId, viewerSeat)
-      : api.getRoom(roomId).then((d) => d.snapshot);
+    const fetch =
+      viewerSeat !== null
+        ? api.getSeatSnapshot(roomId, viewerSeat)
+        : api.getRoom(roomId).then((d) => d.snapshot);
     fetch.then(setSnapshot).catch(() => {});
   };
 
@@ -130,8 +129,8 @@ export default function RoomPage() {
         <span className="text-white font-semibold">Room #{roomId}</span>
         {roomDetails && (
           <span className="text-gray-500 text-xs">
-            {roomDetails.summary.table_config.small_blind}/{roomDetails.summary.table_config.big_blind} blinds
-            · {maxSeats}-max
+            {roomDetails.summary.table_config.small_blind}/
+            {roomDetails.summary.table_config.big_blind} blinds · {maxSeats}-max
           </span>
         )}
         <div className="ml-auto flex items-center gap-3">
@@ -175,7 +174,7 @@ export default function RoomPage() {
               snapshot={snapshot}
               viewerSeat={viewerSeat}
               onViewerSeatChange={setViewerSeat}
-              onCommand={handleHttpCommand}
+              onCommand={handleCommand}
               onQuickStart={handleQuickStart}
               onRefresh={handleRefresh}
               lastError={lastError}
