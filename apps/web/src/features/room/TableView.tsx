@@ -9,7 +9,7 @@ interface TableViewProps {
   maxSeats: number;
   viewerSeat: SeatIndex | null;
   onViewerSeatChange: (seat: SeatIndex | null) => void;
-  onCommand: (cmd: RoomCommand) => void;
+  onCommand: (cmd: RoomCommand) => Promise<void>;
 }
 
 export function TableView({
