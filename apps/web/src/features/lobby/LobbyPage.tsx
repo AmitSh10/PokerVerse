@@ -12,7 +12,17 @@ const DEFAULT_CONFIG: CreateRoomRequest["table_config"] = {
   max_buy_in: 1000,
 };
 
-function RoomRow({ room, onJoin }: { room: RoomSummary; onJoin: () => void }) {
+function RoomRow({
+  room,
+  onJoin,
+  onClose,
+}: {
+  room: RoomSummary;
+  onJoin: () => void;
+  onClose: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+
   return (
     <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 flex items-center justify-between">
       <div className="flex items-center gap-4">
@@ -29,12 +39,39 @@ function RoomRow({ room, onJoin }: { room: RoomSummary; onJoin: () => void }) {
           </span>
         )}
       </div>
-      <button
-        onClick={onJoin}
-        className="bg-blue-700 hover:bg-blue-600 active:bg-blue-800 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors"
-      >
-        Join
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onJoin}
+          className="bg-blue-700 hover:bg-blue-600 active:bg-blue-800 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors"
+        >
+          Join
+        </button>
+        {confirming ? (
+          <>
+            <span className="text-gray-400 text-xs">Close room?</span>
+            <button
+              onClick={() => { onClose(); setConfirming(false); }}
+              className="bg-red-700 hover:bg-red-600 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"
+            >
+              Yes
+            </button>
+            <button
+              onClick={() => setConfirming(false)}
+              className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded text-xs transition-colors"
+            >
+              No
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => setConfirming(true)}
+            className="text-gray-500 hover:text-red-400 text-xs px-2 py-1.5 rounded transition-colors"
+            title="Close room"
+          >
+            ✕
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -56,6 +93,11 @@ export default function LobbyPage() {
       qc.invalidateQueries({ queryKey: ["rooms"] });
       navigate(`/rooms/${res.id}`);
     },
+  });
+
+  const closeRoom = useMutation({
+    mutationFn: (roomId: number) => api.deleteRoom(roomId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["rooms"] }),
   });
 
   const handleCreate = () => {
@@ -123,6 +165,7 @@ export default function LobbyPage() {
             key={room.id}
             room={room}
             onJoin={() => navigate(`/rooms/${room.id}`)}
+            onClose={() => closeRoom.mutate(room.id)}
           />
         ))}
         {data?.rooms.length === 0 && (
