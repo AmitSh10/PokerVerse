@@ -28,12 +28,17 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
   const callAmount = hand.current_bet - roundContrib;
   const amount = parseInt(betAmount, 10);
 
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const act = async (cmd: RoomCommand) => {
     if (pending) return;
+    setActionError(null);
     setPending(true);
     try {
       await onCommand(cmd);
       setBetAmount("");
+    } catch (e) {
+      setActionError((e as Error).message);
     } finally {
       setPending(false);
     }
@@ -60,6 +65,9 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
 
   return (
     <div className="bg-gray-900 border-t border-gray-700 p-4">
+      {actionError && (
+        <p className="text-red-400 text-xs text-center mb-2">{actionError}</p>
+      )}
       <p className="text-xs text-gray-500 mb-3 text-center">
         Your turn — seat {viewerSeat}
         {player && <span className="ml-2 text-gray-400">({player.stack} chips)</span>}

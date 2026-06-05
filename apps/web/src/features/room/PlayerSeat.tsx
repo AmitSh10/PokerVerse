@@ -32,6 +32,7 @@ export function PlayerSeat({
   const [name, setName] = useState("");
   const [buyIn, setBuyIn] = useState("500");
   const [pending, setPending] = useState(false);
+  const [sitError, setSitError] = useState<string | null>(null);
 
   const isActing = hand?.acting_seat === seatIndex;
   const isViewer = viewerSeat === seatIndex;
@@ -41,12 +42,16 @@ export function PlayerSeat({
 
   const handleSit = async () => {
     if (!name.trim() || pending) return;
+    setSitError(null);
     setPending(true);
     try {
       await onCommand(commands.sitPlayer(Date.now(), name.trim(), seatIndex, parseInt(buyIn, 10)));
+      // Only close the form and set viewer seat when the command succeeded
       onViewerSeatChange(seatIndex);
       setShowSitForm(false);
       setName("");
+    } catch (e) {
+      setSitError((e as Error).message);
     } finally {
       setPending(false);
     }
@@ -157,6 +162,9 @@ export function PlayerSeat({
             onKeyDown={(e) => e.key === "Enter" && handleSit()}
             className="bg-gray-700 text-white text-xs px-2 py-1 rounded border border-gray-600 w-full"
           />
+          {sitError && (
+            <p className="text-red-400 text-xs leading-tight">{sitError}</p>
+          )}
           <div className="flex gap-1">
             <button
               onClick={handleSit}
@@ -166,7 +174,7 @@ export function PlayerSeat({
               {pending ? "…" : "Sit"}
             </button>
             <button
-              onClick={() => setShowSitForm(false)}
+              onClick={() => { setShowSitForm(false); setSitError(null); }}
               className="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-xs py-1 rounded"
             >
               Cancel
