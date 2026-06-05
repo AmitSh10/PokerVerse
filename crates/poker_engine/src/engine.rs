@@ -369,6 +369,48 @@ impl GameEngine {
         Ok(PayoutResult { total_pot, payouts })
     }
 
+    /// Awards the pot to the single remaining player when all others have folded.
+    /// Does not evaluate hands — no community cards required.
+    pub fn award_uncontested_pot(&mut self) -> Result<(), GameEngineError> {
+        let contesting = self.contesting_seats();
+
+        if contesting.len() != 1 {
+            return Err(GameEngineError::NoShowdownPlayers);
+        }
+
+        let winner_seat = contesting[0];
+        let hand = self.current_hand.as_mut().ok_or(GameEngineError::NoActiveHand)?;
+        let total_pot = hand.take_pot();
+
+        let player = self
+            .table
+            .player_at_mut(winner_seat)
+            .ok_or(TableError::SeatEmpty { seat: winner_seat })?;
+        player.credit_chips(total_pot);
+
+        self.events.push(GameEvent::PotAwarded {
+            total_pot,
+            payouts: vec![PayoutEvent::new(winner_seat, total_pot)],
+        });
+
+        // Advance through remaining phases to HandComplete
+        loop {
+            let phase = self
+                .current_hand
+                .as_mut()
+                .ok_or(GameEngineError::NoActiveHand)?
+                .advance_phase()
+                .map_err(GameEngineError::HandState)?;
+            self.events.push(GameEvent::PhaseAdvanced { phase });
+            if phase == GamePhase::HandComplete {
+                break;
+            }
+        }
+
+        self.finish_hand()?;
+        Ok(())
+    }
+
     fn record_split_payouts(
         awarded_amounts: &mut Vec<(SeatIndex, ChipAmount)>,
         amount: ChipAmount,
@@ -686,6 +728,10 @@ impl GameEngine {
     }
 
     fn remaining_contesting_player_count(&self) -> usize {
+        self.contesting_seats().len()
+    }
+
+    pub fn contesting_seat_count(&self) -> usize {
         self.contesting_seats().len()
     }
 

@@ -143,6 +143,13 @@ impl Room {
         action: PlayerAction,
     ) -> Result<Vec<GameEvent>, RoomError> {
         self.engine.apply_player_action(seat, action)?;
+
+        // If only one player remains after this action (everyone else folded),
+        // award the pot immediately without going to showdown.
+        if self.engine.current_hand().is_some() && self.engine.contesting_seat_count() == 1 {
+            self.engine.award_uncontested_pot()?;
+        }
+
         Ok(self.engine.drain_events())
     }
 }
