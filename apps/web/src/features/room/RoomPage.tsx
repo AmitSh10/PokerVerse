@@ -10,7 +10,11 @@ import { TableView } from "./TableView";
 import { ActionControls } from "./ActionControls";
 import { EventLog } from "./EventLog";
 import { DebugPanel } from "./DebugPanel";
-import type { GameEvent, GameSnapshot, SeatIndex } from "../../types/api";
+import type { GameEvent, GameSnapshot, RoomCommandResult, SeatIndex } from "../../types/api";
+
+function hasHoleCardsDealt(events: GameEvent[]): boolean {
+  return events.some((e) => typeof e === "object" && e !== null && "HoleCardsDealt" in e);
+}
 
 export default function RoomPage() {
   const { roomId: roomIdStr } = useParams<{ roomId: string }>();
@@ -19,7 +23,6 @@ export default function RoomPage() {
   const qc = useQueryClient();
 
   const { viewerSeat, setViewerSeat } = useRoomStore();
-  // WS is receive-only: broadcasts from other players arrive here.
   const { status, lastResult } = useRoomSocket(roomId);
 
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
@@ -41,30 +44,42 @@ export default function RoomPage() {
   // Refresh private snapshot when viewer seat is chosen
   useEffect(() => {
     if (viewerSeat === null || !snapshot) return;
-    api
-      .getSeatSnapshot(roomId, viewerSeat)
-      .then((s) => setSnapshot(s))
-      .catch(() => {});
+    api.getSeatSnapshot(roomId, viewerSeat).then(setSnapshot).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerSeat]);
 
-  // Apply WS broadcasts (other players' actions or server-pushed updates)
+  // Apply a command result: use private snapshot if viewer has hole cards to show.
+  const applyResult = async (result: RoomCommandResult) => {
+    setEvents((prev) => [...prev, ...result.events]);
+
+    if (viewerSeat !== null && hasHoleCardsDealt(result.events)) {
+      // Hole cards were just dealt — fetch private snapshot so viewer sees their own cards.
+      try {
+        const privateSnap = await api.getSeatSnapshot(roomId, viewerSeat);
+        setSnapshot(privateSnap);
+        return;
+      } catch {
+        // fall through to public snapshot
+      }
+    }
+    setSnapshot(result.snapshot);
+  };
+
+  // Apply WS broadcasts (other players' actions)
   useEffect(() => {
     if (!lastResult) return;
-    setSnapshot(lastResult.snapshot);
-    setEvents((prev) => [...prev, ...lastResult.events]);
+    void applyResult(lastResult);
     setLastError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastResult]);
 
   // All commands go via HTTP for reliable synchronous confirmation.
-  // The WS keeps other connected clients in sync automatically.
   // Re-throws on failure so callers can react (e.g. keep a form open).
   const handleCommand = async (cmd: RoomCommand): Promise<void> => {
     setLastError(null);
     try {
       const result = await api.sendCommand(roomId, cmd);
-      setSnapshot(result.snapshot);
-      setEvents((prev) => [...prev, ...result.events]);
+      await applyResult(result);
     } catch (e) {
       const msg = (e as Error).message;
       setLastError(msg);
@@ -84,18 +99,8 @@ export default function RoomPage() {
         commands.advanceHandPhase(),
       ]) {
         const result = await api.sendCommand(roomId, cmd);
-        setSnapshot(result.snapshot);
-        setEvents((prev) => [...prev, ...result.events]);
+        await applyResult(result);
       }
-    } catch (e) {
-      setLastError((e as Error).message);
-    }
-  };
-
-  const handleCloseRoom = async () => {
-    try {
-      await api.deleteRoom(roomId);
-      navigate("/");
     } catch (e) {
       setLastError((e as Error).message);
     }
@@ -108,6 +113,15 @@ export default function RoomPage() {
         ? api.getSeatSnapshot(roomId, viewerSeat)
         : api.getRoom(roomId).then((d) => d.snapshot);
     fetch.then(setSnapshot).catch(() => {});
+  };
+
+  const handleCloseRoom = async () => {
+    try {
+      await api.deleteRoom(roomId);
+      navigate("/");
+    } catch (e) {
+      setLastError((e as Error).message);
+    }
   };
 
   if (roomError) {
