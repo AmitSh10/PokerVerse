@@ -31,7 +31,18 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
   const roundContrib = hand.contributions.find((c) => c.seat === viewerSeat)?.round ?? 0;
   const canCheck = hand.current_bet === 0 || roundContrib >= hand.current_bet;
   const callAmount = hand.current_bet - roundContrib;
-  const amount = parseInt(betAmount, 10);
+  const parsedAmount = parseInt(betAmount, 10);
+  const hasBet = hand.current_bet > 0;
+
+  // Pot size after calling (basis for pot-relative sizing)
+  const effectivePot = hand.pot + callAmount;
+
+  const quickSizes = [
+    { label: "¼ pot", amount: Math.max(1, Math.round(effectivePot / 4)) },
+    { label: "½ pot", amount: Math.max(1, Math.round(effectivePot / 2)) },
+    { label: "¾ pot", amount: Math.max(1, Math.round((effectivePot * 3) / 4)) },
+    { label: "Pot",   amount: effectivePot },
+  ];
 
   const act = async (cmd: RoomCommand) => {
     if (pending) return;
@@ -51,16 +62,12 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
     const base = "px-4 py-2 rounded font-semibold text-sm transition-colors disabled:opacity-40";
     const styles: Record<string, string> = {
       default: "bg-gray-700 hover:bg-gray-600 text-white",
-      danger: "bg-red-800 hover:bg-red-700 text-white",
+      danger:  "bg-red-800 hover:bg-red-700 text-white",
       primary: "bg-blue-700 hover:bg-blue-600 text-white",
       success: "bg-green-700 hover:bg-green-600 text-white",
     };
     return (
-      <button
-        disabled={pending}
-        className={`${base} ${styles[variant]}`}
-        onClick={() => act(cmd)}
-      >
+      <button disabled={pending} className={`${base} ${styles[variant]}`} onClick={() => act(cmd)}>
         {label}
       </button>
     );
@@ -74,28 +81,61 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
       <p className="text-xs text-gray-500 mb-3 text-center">
         Your turn — seat {viewerSeat}
         {player && <span className="ml-2 text-gray-400">({player.stack} chips)</span>}
+        {effectivePot > 0 && <span className="ml-2 text-gray-500">· pot {effectivePot}</span>}
       </p>
+
       <div className="flex flex-wrap gap-2 justify-center items-center">
+        {/* Primary actions */}
         {btn("Fold", commands.fold(viewerSeat), "danger")}
         {canCheck
           ? btn("Check", commands.check(viewerSeat))
           : btn(`Call ${callAmount}`, commands.call(viewerSeat), "primary")}
-        <div className="flex gap-1 items-center">
-          <input
-            type="number"
-            placeholder="Amount"
-            value={betAmount}
-            onChange={(e) => setBetAmount(e.target.value)}
-            className="bg-gray-700 text-white text-sm px-3 py-2 rounded border border-gray-600 w-24"
-          />
-          {btn(
-            hand.current_bet > 0 ? "Raise" : "Bet",
-            hand.current_bet > 0
-              ? commands.raise(viewerSeat, amount)
-              : commands.bet(viewerSeat, amount),
-            "success",
-          )}
+
+        {/* Bet / raise sizing */}
+        <div className="flex flex-col gap-1.5 items-start">
+          {/* Quick-size buttons */}
+          <div className="flex gap-1">
+            {quickSizes.map(({ label, amount }) => (
+              <button
+                key={label}
+                disabled={pending || amount > (player?.stack ?? 0)}
+                onClick={() => setBetAmount(String(amount))}
+                className={`
+                  text-xs px-2 py-1 rounded border transition-colors disabled:opacity-30
+                  ${betAmount === String(amount)
+                    ? "bg-yellow-700 border-yellow-500 text-white"
+                    : "bg-gray-800 border-gray-600 text-gray-300 hover:bg-gray-700"}
+                `}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Manual input + submit */}
+          <div className="flex gap-1 items-center">
+            <input
+              type="number"
+              placeholder="Amount"
+              value={betAmount}
+              onChange={(e) => setBetAmount(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isNaN(parsedAmount)) {
+                  act(hasBet ? commands.raise(viewerSeat, parsedAmount) : commands.bet(viewerSeat, parsedAmount));
+                }
+              }}
+              className="bg-gray-700 text-white text-sm px-3 py-2 rounded border border-gray-600 w-24"
+            />
+            {btn(
+              hasBet ? "Raise" : "Bet",
+              hasBet
+                ? commands.raise(viewerSeat, parsedAmount)
+                : commands.bet(viewerSeat, parsedAmount),
+              "success",
+            )}
+          </div>
         </div>
+
         {btn("All-In", commands.allIn(viewerSeat), "danger")}
       </div>
     </div>
