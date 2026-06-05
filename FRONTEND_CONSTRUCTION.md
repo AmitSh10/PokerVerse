@@ -424,9 +424,37 @@ The frontend should expect snapshots with these major concepts:
 - Players: seat, display name, stack, status, hole card count, visible hole cards when allowed
 - Hand: phase, acting seat, dealer seat, blind seats, board, pot, current bet, contributions
 - Cards: rank and suit
-- Events: hand started, cards dealt, blinds posted, board revealed, player acted, pot awarded, hand finished
+- Events: hand started, cards dealt, blinds posted, board revealed, player acted, pot awarded, 2-7 bounty awarded, hand finished
 
 The exact TypeScript types should mirror the Rust serde JSON shape and live in one place, likely `src/types/api.ts`.
+
+### 2-7 Bounty Event
+
+When a hand winner holds private hole cards 2 and 7, suited or unsuited, each other dealt-in player pays the winner an extra 10 chips. This also applies when the hand ends because everyone else folded before showdown.
+
+Example event:
+
+```json
+{
+  "TwoSevenBountyAwarded": {
+    "winner_seat": 0,
+    "bounty_per_player": 10,
+    "total_awarded": 20,
+    "payments": [
+      {
+        "payer_seat": 3,
+        "amount": 10
+      },
+      {
+        "payer_seat": 5,
+        "amount": 10
+      }
+    ]
+  }
+}
+```
+
+The frontend should render this separately from normal pot payouts because the chips do not come from the pot.
 
 ## Error Handling
 

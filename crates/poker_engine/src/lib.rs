@@ -16,7 +16,7 @@ pub use deck::Deck;
 pub use engine::{
     GameEngine, GameEngineError, PayoutResult, PlayerPayout, PlayerShowdownHand, ShowdownResult,
 };
-pub use event::{GameEvent, PayoutEvent};
+pub use event::{BountyPaymentEvent, GameEvent, PayoutEvent};
 pub use hand_eval::{
     EvaluatedHand, HandCategory, HandEvaluationError, HandRank, evaluate_best_hand,
 };

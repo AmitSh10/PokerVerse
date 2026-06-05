@@ -33,6 +33,12 @@ pub enum GameEvent {
         total_pot: ChipAmount,
         payouts: Vec<PayoutEvent>,
     },
+    TwoSevenBountyAwarded {
+        winner_seat: SeatIndex,
+        bounty_per_player: ChipAmount,
+        total_awarded: ChipAmount,
+        payments: Vec<BountyPaymentEvent>,
+    },
     HandFinished,
 }
 
@@ -49,6 +55,26 @@ impl PayoutEvent {
 
     pub fn seat(&self) -> SeatIndex {
         self.seat
+    }
+
+    pub fn amount(&self) -> ChipAmount {
+        self.amount
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BountyPaymentEvent {
+    payer_seat: SeatIndex,
+    amount: ChipAmount,
+}
+
+impl BountyPaymentEvent {
+    pub fn new(payer_seat: SeatIndex, amount: ChipAmount) -> Self {
+        Self { payer_seat, amount }
+    }
+
+    pub fn payer_seat(&self) -> SeatIndex {
+        self.payer_seat
     }
 
     pub fn amount(&self) -> ChipAmount {

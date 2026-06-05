@@ -1,11 +1,14 @@
 use std::fmt;
 
 use crate::{
-    Card, ChipAmount, ContributionSnapshot, Deck, EvaluatedHand, GameEvent, GamePhase,
-    GameSnapshot, HandEvaluationError, HandSnapshot, HandState, HandStateError, PayoutEvent,
-    Player, PlayerAction, PlayerError, PlayerId, PlayerSnapshot, PlayerStatus, PotContribution,
-    SeatIndex, Table, TableConfig, TableError, calculate_side_pots, evaluate_best_hand,
+    BountyPaymentEvent, Card, ChipAmount, ContributionSnapshot, Deck, EvaluatedHand, GameEvent,
+    GamePhase, GameSnapshot, HandEvaluationError, HandSnapshot, HandState, HandStateError,
+    PayoutEvent, Player, PlayerAction, PlayerError, PlayerId, PlayerSnapshot, PlayerStatus,
+    PotContribution, Rank, SeatIndex, Table, TableConfig, TableError, calculate_side_pots,
+    evaluate_best_hand,
 };
+
+const TWO_SEVEN_BOUNTY_AMOUNT: ChipAmount = 10;
 
 #[derive(Debug, Clone)]
 pub struct GameEngine {
@@ -303,6 +306,7 @@ impl GameEngine {
 
     pub fn award_showdown_pot(&mut self) -> Result<PayoutResult, GameEngineError> {
         let showdown = self.showdown()?;
+        let two_seven_winner_seats = self.two_seven_bounty_winner_seats(showdown.winner_seats());
         let (total_pot, contributions) = {
             let hand = self
                 .current_hand
@@ -361,6 +365,8 @@ impl GameEngine {
             });
         }
 
+        let bounty_events = self.award_two_seven_bounties(&two_seven_winner_seats)?;
+
         self.advance_hand_phase()?;
         self.events.push(GameEvent::PotAwarded {
             total_pot,
@@ -369,12 +375,13 @@ impl GameEngine {
                 .map(|payout| PayoutEvent::new(payout.seat(), payout.amount()))
                 .collect(),
         });
+        self.events.extend(bounty_events);
 
         Ok(PayoutResult { total_pot, payouts })
     }
 
     /// Awards the pot to the single remaining player when all others have folded.
-    /// Does not evaluate hands — no community cards required.
+    /// Does not evaluate hands, but private hole cards still count for table bounties.
     pub fn award_uncontested_pot(&mut self) -> Result<(), GameEngineError> {
         let contesting = self.contesting_seats();
 
@@ -383,7 +390,10 @@ impl GameEngine {
         }
 
         let winner_seat = contesting[0];
-        let hand = self.current_hand.as_mut().ok_or(GameEngineError::NoActiveHand)?;
+        let hand = self
+            .current_hand
+            .as_mut()
+            .ok_or(GameEngineError::NoActiveHand)?;
         let total_pot = hand.take_pot();
 
         let player = self
@@ -396,6 +406,15 @@ impl GameEngine {
             total_pot,
             payouts: vec![PayoutEvent::new(winner_seat, total_pot)],
         });
+        let bounty_events = if self
+            .two_seven_bounty_winner_seats(&[winner_seat])
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            self.award_two_seven_bounties(&[winner_seat])?
+        };
+        self.events.extend(bounty_events);
 
         // Advance through remaining phases to HandComplete
         loop {
@@ -438,6 +457,94 @@ impl GameEngine {
         }
 
         awarded_amounts.sort_by_key(|(seat, _)| seat.0);
+    }
+
+    fn two_seven_bounty_winner_seats(&self, winner_seats: &[SeatIndex]) -> Vec<SeatIndex> {
+        winner_seats
+            .iter()
+            .copied()
+            .filter(|seat| {
+                self.table
+                    .player_at(*seat)
+                    .is_some_and(|player| Self::hole_cards_are_two_seven(player.hole_cards()))
+            })
+            .collect()
+    }
+
+    fn award_two_seven_bounties(
+        &mut self,
+        winner_seats: &[SeatIndex],
+    ) -> Result<Vec<GameEvent>, GameEngineError> {
+        let payer_seats = self.dealt_in_seats();
+        let mut events = Vec::new();
+
+        for winner_seat in winner_seats {
+            let mut payments = Vec::new();
+            let mut total_awarded = 0;
+
+            for payer_seat in payer_seats.iter().copied() {
+                if payer_seat == *winner_seat {
+                    continue;
+                }
+
+                let amount = self
+                    .table
+                    .player_at(payer_seat)
+                    .ok_or(TableError::SeatEmpty { seat: payer_seat })?
+                    .stack()
+                    .min(TWO_SEVEN_BOUNTY_AMOUNT);
+
+                if amount == 0 {
+                    continue;
+                }
+
+                self.table
+                    .player_at_mut(payer_seat)
+                    .ok_or(TableError::SeatEmpty { seat: payer_seat })?
+                    .debit_chips(amount)?;
+                self.table
+                    .player_at_mut(*winner_seat)
+                    .ok_or(TableError::SeatEmpty { seat: *winner_seat })?
+                    .credit_chips(amount);
+
+                payments.push(BountyPaymentEvent::new(payer_seat, amount));
+                total_awarded += amount;
+            }
+
+            if total_awarded > 0 {
+                events.push(GameEvent::TwoSevenBountyAwarded {
+                    winner_seat: *winner_seat,
+                    bounty_per_player: TWO_SEVEN_BOUNTY_AMOUNT,
+                    total_awarded,
+                    payments,
+                });
+            }
+        }
+
+        Ok(events)
+    }
+
+    fn dealt_in_seats(&self) -> Vec<SeatIndex> {
+        self.table
+            .occupied_seats()
+            .into_iter()
+            .filter(|seat| {
+                self.table
+                    .player_at(*seat)
+                    .is_some_and(|player| player.hole_cards().len() == Player::MAX_HOLE_CARDS)
+            })
+            .collect()
+    }
+
+    fn hole_cards_are_two_seven(cards: &[Card]) -> bool {
+        if cards.len() != Player::MAX_HOLE_CARDS {
+            return false;
+        }
+
+        matches!(
+            (cards[0].rank, cards[1].rank),
+            (Rank::Two, Rank::Seven) | (Rank::Seven, Rank::Two)
+        )
     }
 
     fn snapshot_for_viewer(&self, viewer_seat: Option<SeatIndex>) -> GameSnapshot {
@@ -1747,6 +1854,199 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn two_seven_bounty_accepts_suited_or_unsuited_hole_cards() {
+        assert!(GameEngine::hole_cards_are_two_seven(&[
+            card(Rank::Two, Suit::Clubs),
+            card(Rank::Seven, Suit::Clubs),
+        ]));
+        assert!(GameEngine::hole_cards_are_two_seven(&[
+            card(Rank::Seven, Suit::Hearts),
+            card(Rank::Two, Suit::Spades),
+        ]));
+        assert!(!GameEngine::hole_cards_are_two_seven(&[
+            card(Rank::Two, Suit::Clubs),
+            card(Rank::Eight, Suit::Clubs),
+        ]));
+    }
+
+    #[test]
+    fn award_showdown_pot_awards_two_seven_bounty_from_each_other_dealt_player() {
+        let mut engine = engine_with_three_players_started_hand();
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(0),
+            [
+                card(Rank::Two, Suit::Clubs),
+                card(Rank::Seven, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(3),
+            [
+                card(Rank::Nine, Suit::Clubs),
+                card(Rank::Eight, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(5),
+            [
+                card(Rank::Four, Suit::Clubs),
+                card(Rank::Three, Suit::Diamonds),
+            ],
+        );
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        force_commit_chips(&mut engine, SeatIndex(0), 10);
+        force_board_and_showdown(
+            &mut engine,
+            [
+                card(Rank::Seven, Suit::Spades),
+                card(Rank::Seven, Suit::Hearts),
+                card(Rank::Ace, Suit::Clubs),
+            ],
+            card(Rank::King, Suit::Diamonds),
+            card(Rank::Queen, Suit::Spades),
+        );
+        engine.drain_events();
+
+        let payout = engine
+            .award_showdown_pot()
+            .expect("showdown pot should be awarded");
+
+        assert_eq!(payout.total_pot(), 25);
+        assert_eq!(payout.payouts().len(), 1);
+        assert_eq!(payout.payouts()[0].seat(), SeatIndex(0));
+        assert_eq!(payout.payouts()[0].amount(), 25);
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("bounty winner should be seated")
+                .stack(),
+            1_035
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(3))
+                .expect("first payer should be seated")
+                .stack(),
+            985
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(5))
+                .expect("second payer should be seated")
+                .stack(),
+            980
+        );
+        assert_eq!(
+            engine.events(),
+            &[
+                GameEvent::PhaseAdvanced {
+                    phase: GamePhase::HandComplete,
+                },
+                GameEvent::PotAwarded {
+                    total_pot: 25,
+                    payouts: vec![PayoutEvent::new(SeatIndex(0), 25)],
+                },
+                GameEvent::TwoSevenBountyAwarded {
+                    winner_seat: SeatIndex(0),
+                    bounty_per_player: 10,
+                    total_awarded: 20,
+                    payments: vec![
+                        BountyPaymentEvent::new(SeatIndex(3), 10),
+                        BountyPaymentEvent::new(SeatIndex(5), 10),
+                    ],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn award_uncontested_pot_awards_two_seven_bounty_when_everyone_folds() {
+        let mut engine = engine_with_three_players_started_hand();
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(0),
+            [
+                card(Rank::Seven, Suit::Clubs),
+                card(Rank::Two, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(3),
+            [
+                card(Rank::Ace, Suit::Clubs),
+                card(Rank::King, Suit::Diamonds),
+            ],
+        );
+        force_hole_cards(
+            &mut engine,
+            SeatIndex(5),
+            [
+                card(Rank::Queen, Suit::Clubs),
+                card(Rank::Jack, Suit::Diamonds),
+            ],
+        );
+        advance_to(&mut engine, GamePhase::PostingBlinds);
+        engine.post_blinds().expect("blinds should post");
+        engine
+            .table_mut()
+            .player_at_mut(SeatIndex(3))
+            .expect("small blind should be seated")
+            .fold();
+        engine
+            .table_mut()
+            .player_at_mut(SeatIndex(5))
+            .expect("big blind should be seated")
+            .fold();
+        engine.drain_events();
+
+        engine
+            .award_uncontested_pot()
+            .expect("uncontested pot should be awarded");
+
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(0))
+                .expect("bounty winner should be seated")
+                .stack(),
+            1_035
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(3))
+                .expect("first folded payer should be seated")
+                .stack(),
+            985
+        );
+        assert_eq!(
+            engine
+                .table()
+                .player_at(SeatIndex(5))
+                .expect("second folded payer should be seated")
+                .stack(),
+            980
+        );
+        assert!(engine.events().contains(&GameEvent::TwoSevenBountyAwarded {
+            winner_seat: SeatIndex(0),
+            bounty_per_player: 10,
+            total_awarded: 20,
+            payments: vec![
+                BountyPaymentEvent::new(SeatIndex(3), 10),
+                BountyPaymentEvent::new(SeatIndex(5), 10),
+            ],
+        }));
     }
 
     #[test]
