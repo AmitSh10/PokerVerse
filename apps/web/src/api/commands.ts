@@ -15,33 +15,25 @@ export type RoomCommand =
   | "PublicSnapshot"
   | { PrivateSnapshot: { seat: SeatIndex } };
 
-function seat(index: number): SeatIndex {
-  return { "0": index };
-}
-
-function playerId(id: number): PlayerId {
-  return { "0": id };
-}
-
 export const commands = {
-  sitPlayer(id: number, displayName: string, seatIndex: number, buyIn: ChipAmount): RoomCommand {
-    return { SitPlayer: { id: playerId(id), display_name: displayName, seat: seat(seatIndex), buy_in: buyIn } };
+  sitPlayer(id: PlayerId, displayName: string, seat: SeatIndex, buyIn: ChipAmount): RoomCommand {
+    return { SitPlayer: { id, display_name: displayName, seat, buy_in: buyIn } };
   },
 
-  leaveSeat(seatIndex: number): RoomCommand {
-    return { LeaveSeat: { seat: seat(seatIndex) } };
+  leaveSeat(seat: SeatIndex): RoomCommand {
+    return { LeaveSeat: { seat } };
   },
 
-  sitOut(seatIndex: number): RoomCommand {
-    return { SitOut: { seat: seat(seatIndex) } };
+  sitOut(seat: SeatIndex): RoomCommand {
+    return { SitOut: { seat } };
   },
 
-  sitIn(seatIndex: number): RoomCommand {
-    return { SitIn: { seat: seat(seatIndex) } };
+  sitIn(seat: SeatIndex): RoomCommand {
+    return { SitIn: { seat } };
   },
 
-  startHand(dealerSeat: number): RoomCommand {
-    return { StartHand: { dealer_seat: seat(dealerSeat) } };
+  startHand(dealerSeat: SeatIndex): RoomCommand {
+    return { StartHand: { dealer_seat: dealerSeat } };
   },
 
   advanceHandPhase(): RoomCommand {
@@ -52,35 +44,35 @@ export const commands = {
     return "PostBlinds";
   },
 
-  fold(seatIndex: number): RoomCommand {
-    return { ApplyPlayerAction: { seat: seat(seatIndex), action: "Fold" } };
+  fold(seat: SeatIndex): RoomCommand {
+    return { ApplyPlayerAction: { seat, action: "Fold" } };
   },
 
-  check(seatIndex: number): RoomCommand {
-    return { ApplyPlayerAction: { seat: seat(seatIndex), action: "Check" } };
+  check(seat: SeatIndex): RoomCommand {
+    return { ApplyPlayerAction: { seat, action: "Check" } };
   },
 
-  call(seatIndex: number): RoomCommand {
-    return { ApplyPlayerAction: { seat: seat(seatIndex), action: "Call" } };
+  call(seat: SeatIndex): RoomCommand {
+    return { ApplyPlayerAction: { seat, action: "Call" } };
   },
 
-  bet(seatIndex: number, amount: ChipAmount): RoomCommand {
-    return { ApplyPlayerAction: { seat: seat(seatIndex), action: { Bet: { amount } } } };
+  bet(seat: SeatIndex, amount: ChipAmount): RoomCommand {
+    return { ApplyPlayerAction: { seat, action: { Bet: { amount } } } };
   },
 
-  raise(seatIndex: number, amount: ChipAmount): RoomCommand {
-    return { ApplyPlayerAction: { seat: seat(seatIndex), action: { Raise: { amount } } } };
+  raise(seat: SeatIndex, amount: ChipAmount): RoomCommand {
+    return { ApplyPlayerAction: { seat, action: { Raise: { amount } } } };
   },
 
-  allIn(seatIndex: number): RoomCommand {
-    return { ApplyPlayerAction: { seat: seat(seatIndex), action: "AllIn" } };
+  allIn(seat: SeatIndex): RoomCommand {
+    return { ApplyPlayerAction: { seat, action: "AllIn" } };
   },
 
   publicSnapshot(): RoomCommand {
     return "PublicSnapshot";
   },
 
-  privateSnapshot(seatIndex: number): RoomCommand {
-    return { PrivateSnapshot: { seat: seat(seatIndex) } };
+  privateSnapshot(seat: SeatIndex): RoomCommand {
+    return { PrivateSnapshot: { seat } };
   },
 };

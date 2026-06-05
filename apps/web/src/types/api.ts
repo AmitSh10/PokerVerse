@@ -1,9 +1,10 @@
 // Mirrors Rust serde JSON shapes exactly. Do not add poker logic here.
 
+// Rust newtypes (PlayerId(u64), SeatIndex(u8), RoomId(u64)) serialize as plain numbers.
 export type ChipAmount = number;
-export type PlayerId = { "0": number };
-export type SeatIndex = { "0": number };
-export type RoomId = { "0": number };
+export type PlayerId = number;
+export type SeatIndex = number;
+export type RoomId = number;
 
 export type Suit = "Clubs" | "Diamonds" | "Hearts" | "Spades";
 
