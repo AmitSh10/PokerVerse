@@ -10,6 +10,7 @@ interface DebugPanelProps {
   onQuickStart: (dealerSeat: SeatIndex) => Promise<void>;
   onRefresh: () => void;
   lastError: string | null;
+  lastDealerSeat: SeatIndex | null;
 }
 
 export function DebugPanel({
@@ -20,6 +21,7 @@ export function DebugPanel({
   onQuickStart,
   onRefresh,
   lastError,
+  lastDealerSeat,
 }: DebugPanelProps) {
   const [showJson, setShowJson] = useState(false);
   const [pending, setPending] = useState(false);
@@ -31,7 +33,19 @@ export function DebugPanel({
 
   const [dealerSeat, setDealerSeat] = useState<number>(playerSeats[0] ?? 0);
 
-  // Keep dealer seat valid when snapshot changes
+  // When no hand is active and the last hand's dealer is known, auto-advance
+  // the dealer button clockwise to the next player seat.
+  useEffect(() => {
+    if (snapshot.hand !== null || lastDealerSeat === null || playerSeats.length === 0) return;
+    const prevIdx = playerSeats.indexOf(lastDealerSeat);
+    const nextDealer =
+      prevIdx === -1
+        ? playerSeats[0]
+        : playerSeats[(prevIdx + 1) % playerSeats.length];
+    setDealerSeat(nextDealer);
+  }, [snapshot.hand, lastDealerSeat]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep dealer seat valid when player list changes (e.g. someone leaves)
   useEffect(() => {
     if (playerSeats.length > 0 && !playerSeats.includes(dealerSeat)) {
       setDealerSeat(playerSeats[0]);

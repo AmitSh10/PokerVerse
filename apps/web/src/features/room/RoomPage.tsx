@@ -24,6 +24,7 @@ export default function RoomPage() {
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [lastDealerSeat, setLastDealerSeat] = useState<SeatIndex | null>(null);
 
   // Track in-flight HTTP commands so WS broadcasts for those results are ignored.
   const pendingHttpRef = useRef(0);
@@ -64,6 +65,11 @@ export default function RoomPage() {
   };
 
   const applyResult = async (result: RoomCommandResult) => {
+    for (const event of result.events) {
+      if (typeof event === "object" && event !== null && "HandStarted" in event) {
+        setLastDealerSeat(event.HandStarted.dealer_seat);
+      }
+    }
     setEvents((prev) => [...prev, ...result.events]);
     setSnapshot(await resolveSnapshot(result.snapshot));
   };
@@ -205,6 +211,7 @@ export default function RoomPage() {
               onQuickStart={handleQuickStart}
               onRefresh={handleRefresh}
               lastError={lastError}
+              lastDealerSeat={lastDealerSeat}
             />
           )}
         </div>
