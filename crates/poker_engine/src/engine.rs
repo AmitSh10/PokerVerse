@@ -235,6 +235,10 @@ impl GameEngine {
         for seat in self.table.occupied_seats() {
             if let Some(player) = self.table.player_at_mut(seat) {
                 player.clear_hole_cards();
+                // Folded players are ready for the next hand.
+                if player.status() == PlayerStatus::Folded {
+                    player.sit_in();
+                }
             }
         }
         self.events.push(GameEvent::HandFinished);
