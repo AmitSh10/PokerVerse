@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
@@ -12,10 +12,6 @@ import { EventLog } from "./EventLog";
 import { DebugPanel } from "./DebugPanel";
 import type { GameEvent, GameSnapshot, RoomCommandResult, SeatIndex } from "../../types/api";
 
-function hasHoleCardsDealt(events: GameEvent[]): boolean {
-  return events.some((e) => typeof e === "object" && e !== null && "HoleCardsDealt" in e);
-}
-
 export default function RoomPage() {
   const { roomId: roomIdStr } = useParams<{ roomId: string }>();
   const roomId = Number(roomIdStr);
@@ -28,6 +24,11 @@ export default function RoomPage() {
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
+
+  // Track in-flight HTTP commands so WS broadcasts for those results are ignored.
+  const pendingHttpRef = useRef(0);
+  // Deduplicate WS results in StrictMode (which runs effects twice).
+  const lastWsResultRef = useRef<RoomCommandResult | null>(null);
 
   // Initial HTTP load
   const { data: roomDetails, error: roomError } = useQuery({
@@ -48,37 +49,50 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerSeat]);
 
-  // Apply a command result: use private snapshot if viewer has hole cards to show.
-  const applyResult = async (result: RoomCommandResult) => {
-    setEvents((prev) => [...prev, ...result.events]);
-
-    if (viewerSeat !== null && hasHoleCardsDealt(result.events)) {
-      // Hole cards were just dealt — fetch private snapshot so viewer sees their own cards.
+  // Resolve the snapshot to show: if there's an active hand and a viewer seat,
+  // always use the private snapshot so hole cards stay visible.
+  const resolveSnapshot = async (publicSnap: GameSnapshot): Promise<GameSnapshot> => {
+    if (viewerSeat !== null && publicSnap.hand !== null) {
       try {
-        const privateSnap = await api.getSeatSnapshot(roomId, viewerSeat);
-        setSnapshot(privateSnap);
-        return;
+        return await api.getSeatSnapshot(roomId, viewerSeat);
       } catch {
-        // fall through to public snapshot
+        // seat may not be in this hand — fall through
       }
     }
-    setSnapshot(result.snapshot);
+    return publicSnap;
   };
 
-  // Apply WS broadcasts (other players' actions)
+  const applyResult = async (result: RoomCommandResult) => {
+    setEvents((prev) => [...prev, ...result.events]);
+    setSnapshot(await resolveSnapshot(result.snapshot));
+  };
+
+  // Apply WS broadcasts (other players' actions).
+  // Skip if an HTTP command is in-flight (it already calls applyResult directly)
+  // and deduplicate StrictMode double-invoke.
   useEffect(() => {
     if (!lastResult) return;
+    if (lastResult === lastWsResultRef.current) return;
+    lastWsResultRef.current = lastResult;
+    if (pendingHttpRef.current > 0) return;
     void applyResult(lastResult);
-    setLastError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastResult]);
 
-  // All commands go via HTTP for reliable synchronous confirmation.
-  // Re-throws on failure so callers can react (e.g. keep a form open).
+  const sendHttp = async (cmd: RoomCommand): Promise<RoomCommandResult> => {
+    pendingHttpRef.current++;
+    try {
+      return await api.sendCommand(roomId, cmd);
+    } finally {
+      pendingHttpRef.current--;
+    }
+  };
+
+  // All commands go via HTTP. Re-throws on failure so callers can react.
   const handleCommand = async (cmd: RoomCommand): Promise<void> => {
     setLastError(null);
     try {
-      const result = await api.sendCommand(roomId, cmd);
+      const result = await sendHttp(cmd);
       await applyResult(result);
     } catch (e) {
       const msg = (e as Error).message;
@@ -87,7 +101,6 @@ export default function RoomPage() {
     }
   };
 
-  // Runs the full sequence to reach PreFlop in one click:
   // StartHand → AdvancePhase (PostingBlinds) → PostBlinds → AdvancePhase (PreFlop)
   const handleQuickStart = async (dealerSeat: SeatIndex): Promise<void> => {
     setLastError(null);
@@ -98,7 +111,7 @@ export default function RoomPage() {
         commands.postBlinds(),
         commands.advanceHandPhase(),
       ]) {
-        const result = await api.sendCommand(roomId, cmd);
+        const result = await sendHttp(cmd);
         await applyResult(result);
       }
     } catch (e) {
@@ -129,10 +142,7 @@ export default function RoomPage() {
       <div className="min-h-screen bg-gray-950 flex items-center justify-center">
         <div className="text-center">
           <p className="text-red-400 mb-4">Room not found or server unreachable.</p>
-          <button
-            onClick={() => navigate("/")}
-            className="text-blue-400 hover:text-blue-300 text-sm"
-          >
+          <button onClick={() => navigate("/")} className="text-blue-400 hover:text-blue-300 text-sm">
             ← Back to lobby
           </button>
         </div>
@@ -144,12 +154,8 @@ export default function RoomPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col">
-      {/* Top bar */}
       <header className="bg-gray-900 border-b border-gray-800 px-4 py-2 flex items-center gap-4">
-        <button
-          onClick={() => navigate("/")}
-          className="text-gray-500 hover:text-gray-300 text-sm transition-colors"
-        >
+        <button onClick={() => navigate("/")} className="text-gray-500 hover:text-gray-300 text-sm transition-colors">
           ← Lobby
         </button>
         <span className="text-white font-semibold">Room #{roomId}</span>
@@ -167,16 +173,13 @@ export default function RoomPage() {
           <button
             onClick={handleCloseRoom}
             className="text-gray-600 hover:text-red-400 text-xs transition-colors border border-gray-700 hover:border-red-800 px-2 py-1 rounded"
-            title="Close room"
           >
             Close room
           </button>
         </div>
       </header>
 
-      {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Table area */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 p-4 overflow-auto">
             {snapshot ? (
@@ -195,11 +198,7 @@ export default function RoomPage() {
           </div>
 
           {snapshot && (
-            <ActionControls
-              snapshot={snapshot}
-              viewerSeat={viewerSeat}
-              onCommand={handleCommand}
-            />
+            <ActionControls snapshot={snapshot} viewerSeat={viewerSeat} onCommand={handleCommand} />
           )}
 
           {snapshot && (
@@ -215,7 +214,6 @@ export default function RoomPage() {
           )}
         </div>
 
-        {/* Event log sidebar */}
         <aside className="w-64 border-l border-gray-800 bg-gray-900 flex flex-col overflow-hidden shrink-0">
           <EventLog events={events} />
         </aside>
