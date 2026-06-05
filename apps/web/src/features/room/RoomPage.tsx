@@ -58,6 +58,7 @@ export default function RoomPage() {
 
   // All commands go via HTTP for reliable synchronous confirmation.
   // The WS keeps other connected clients in sync automatically.
+  // Re-throws on failure so callers can react (e.g. keep a form open).
   const handleCommand = async (cmd: RoomCommand): Promise<void> => {
     setLastError(null);
     try {
@@ -65,7 +66,9 @@ export default function RoomPage() {
       setSnapshot(result.snapshot);
       setEvents((prev) => [...prev, ...result.events]);
     } catch (e) {
-      setLastError((e as Error).message);
+      const msg = (e as Error).message;
+      setLastError(msg);
+      throw e;
     }
   };
 
