@@ -9,8 +9,11 @@ interface ActionControlsProps {
 }
 
 export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionControlsProps) {
+  // All hooks must be at the top — no early returns before this line
   const [betAmount, setBetAmount] = useState("");
   const [pending, setPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const hand = snapshot.hand;
 
   if (!hand || viewerSeat === null) return null;
@@ -27,8 +30,6 @@ export function ActionControls({ snapshot, viewerSeat, onCommand }: ActionContro
   const canCheck = hand.current_bet === 0 || roundContrib >= hand.current_bet;
   const callAmount = hand.current_bet - roundContrib;
   const amount = parseInt(betAmount, 10);
-
-  const [actionError, setActionError] = useState<string | null>(null);
 
   const act = async (cmd: RoomCommand) => {
     if (pending) return;
