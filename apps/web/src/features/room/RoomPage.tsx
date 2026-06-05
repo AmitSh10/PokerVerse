@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
-import type { RoomCommand } from "../../api/commands";
+import { commands, type RoomCommand } from "../../api/commands";
 import { useRoomSocket } from "../../hooks/useRoomSocket";
 import { useRoomStore } from "../../stores/roomStore";
 import { ConnectionBadge } from "../../components/ConnectionBadge";
@@ -10,7 +10,7 @@ import { TableView } from "./TableView";
 import { ActionControls } from "./ActionControls";
 import { EventLog } from "./EventLog";
 import { DebugPanel } from "./DebugPanel";
-import type { GameEvent, GameSnapshot } from "../../types/api";
+import type { GameEvent, GameSnapshot, SeatIndex } from "../../types/api";
 
 export default function RoomPage() {
   const { roomId: roomIdStr } = useParams<{ roomId: string }>();
@@ -23,6 +23,7 @@ export default function RoomPage() {
 
   const [snapshot, setSnapshot] = useState<GameSnapshot | null>(null);
   const [events, setEvents] = useState<GameEvent[]>([]);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   // Initial HTTP load
   const { data: roomDetails, error: roomError } = useQuery({
@@ -36,14 +37,14 @@ export default function RoomPage() {
     if (roomDetails && !snapshot) setSnapshot(roomDetails.snapshot);
   }, [roomDetails, snapshot]);
 
-  // Apply private snapshot when viewer seat changes
+  // Refresh private snapshot when viewer seat is chosen
   useEffect(() => {
     if (viewerSeat === null || !snapshot) return;
     api
       .getSeatSnapshot(roomId, viewerSeat)
       .then((s) => setSnapshot(s))
-      .catch(() => {/* seat may not exist yet */});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewerSeat]);
 
   // Apply WS updates
@@ -51,29 +52,51 @@ export default function RoomPage() {
     if (!lastResult) return;
     setSnapshot(lastResult.snapshot);
     setEvents((prev) => [...prev, ...lastResult.events]);
+    setLastError(null);
   }, [lastResult]);
 
+  // Send via WS during an active hand; use HTTP otherwise
   const handleCommand = (cmd: RoomCommand) => {
     send(cmd);
   };
 
-  const handleHttpCommand = async (cmd: RoomCommand) => {
+  const handleHttpCommand = async (cmd: RoomCommand): Promise<void> => {
+    setLastError(null);
     try {
       const result = await api.sendCommand(roomId, cmd);
       setSnapshot(result.snapshot);
       setEvents((prev) => [...prev, ...result.events]);
     } catch (e) {
-      console.error("Command failed:", e);
+      setLastError((e as Error).message);
     }
+  };
+
+  // Runs the full sequence to get from idle → PreFlop in one click:
+  // StartHand → AdvancePhase (PostingBlinds) → PostBlinds → AdvancePhase (PreFlop)
+  const handleQuickStart = async (dealerSeat: SeatIndex): Promise<void> => {
+    setLastError(null);
+    try {
+      await runCommand(commands.startHand(dealerSeat));
+      await runCommand(commands.advanceHandPhase());
+      await runCommand(commands.postBlinds());
+      await runCommand(commands.advanceHandPhase());
+    } catch (e) {
+      setLastError((e as Error).message);
+    }
+  };
+
+  const runCommand = async (cmd: RoomCommand) => {
+    const result = await api.sendCommand(roomId, cmd);
+    setSnapshot(result.snapshot);
+    setEvents((prev) => [...prev, ...result.events]);
   };
 
   const handleRefresh = () => {
     qc.invalidateQueries({ queryKey: ["room", roomId] });
-    if (viewerSeat !== null) {
-      api.getSeatSnapshot(roomId, viewerSeat).then(setSnapshot).catch(() => {});
-    } else {
-      api.getRoom(roomId).then((d) => setSnapshot(d.snapshot)).catch(() => {});
-    }
+    const fetch = viewerSeat !== null
+      ? api.getSeatSnapshot(roomId, viewerSeat)
+      : api.getRoom(roomId).then((d) => d.snapshot);
+    fetch.then(setSnapshot).catch(() => {});
   };
 
   if (roomError) {
@@ -121,7 +144,7 @@ export default function RoomPage() {
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Table */}
+        {/* Table area */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 p-4 overflow-auto">
             {snapshot ? (
@@ -150,11 +173,12 @@ export default function RoomPage() {
           {snapshot && (
             <DebugPanel
               snapshot={snapshot}
-              maxSeats={maxSeats}
               viewerSeat={viewerSeat}
               onViewerSeatChange={setViewerSeat}
               onCommand={handleHttpCommand}
+              onQuickStart={handleQuickStart}
               onRefresh={handleRefresh}
+              lastError={lastError}
             />
           )}
         </div>
