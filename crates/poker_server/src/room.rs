@@ -116,7 +116,19 @@ impl Room {
     }
 
     pub fn advance_hand_phase(&mut self) -> Result<Vec<GameEvent>, RoomError> {
-        self.engine.advance_hand_phase()?;
+        // When in Showdown, award the pot and finish the hand in one step
+        // rather than just ticking the phase counter.
+        if self
+            .engine
+            .current_hand()
+            .map(|h| h.phase() == GamePhase::Showdown)
+            .unwrap_or(false)
+        {
+            self.engine.award_showdown_pot()?;
+            self.engine.finish_hand()?;
+        } else {
+            self.engine.advance_hand_phase()?;
+        }
         Ok(self.engine.drain_events())
     }
 

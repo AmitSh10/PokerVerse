@@ -37,9 +37,9 @@ export function formatEvent(event: GameEvent): string {
   }
   if ("PotAwarded" in event) {
     const payouts = event.PotAwarded.payouts
-      .map((p) => `seat ${p.seat} +${p.amount}`)
+      .map((p) => `seat ${p.seat} wins ${p.amount}`)
       .join(", ");
-    return `Pot ${event.PotAwarded.total_pot} awarded — ${payouts}`;
+    return `🏆 Pot ${event.PotAwarded.total_pot} — ${payouts}`;
   }
   return JSON.stringify(event);
 }
