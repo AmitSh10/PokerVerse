@@ -67,17 +67,11 @@ export default function RoomPage() {
     setSnapshot(await resolveSnapshot(result.snapshot));
   };
 
-  // Apply WS broadcasts (other players' actions).
-  // Skip if an HTTP command is in-flight (it already calls applyResult directly)
-  // and deduplicate StrictMode double-invoke.
-  useEffect(() => {
-    if (!lastResult) return;
-    if (lastResult === lastWsResultRef.current) return;
-    lastWsResultRef.current = lastResult;
-    if (pendingHttpRef.current > 0) return;
-    void applyResult(lastResult);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastResult]);
+  // Phase 2: all commands go via HTTP from this single browser, so WS broadcasts
+  // are always duplicate copies of results we already applied. Suppress them here.
+  // Phase 3 (real-time multiplayer) will re-enable this with proper deduplication
+  // so that other players' actions arrive via WS.
+  void lastResult; void lastWsResultRef; void pendingHttpRef;
 
   const sendHttp = async (cmd: RoomCommand): Promise<RoomCommandResult> => {
     pendingHttpRef.current++;
